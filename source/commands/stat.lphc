@@ -1,0 +1,153 @@
+@mode(host.native)
+
+# The stat command: check the C layouts, then report each FILE (its status,
+# or with -f its file system's) in the chosen format, or list file systems
+# with --df. The only module that prints.
+#
+# Runtime: host.native. Compiled into the native binary build/stat by
+# `make build` (Stage0 native build). tests/app_test.lphc runs it through
+# cli.app.run() in native test binaries; their output goes to the test's
+# log.
+
+from appinfo import (APP_NAME, EXIT_OK, EXIT_FAILURE);
+from cli.args import (Options);
+from df.mounts import (Mount, DfRow, read_mounts, mount_for, row_for, listing_rows, df_table);
+from format.fields import (FileFields, FsFields, default_file_format, default_fs_format,
+    TERSE_FILE_FORMAT, TERSE_FS_FORMAT, shell_quote, is_device);
+from format.printf import (Expansion, expand, format_problem);
+from sys.clock import (load_time_zone);
+from sys.cstructs import (layout_errors);
+from sys.libc import (file_status, fs_status, errno_message);
+
+func complain(message: string): void {
+    printErr(i"{$ APP_NAME $}: {$ message $}");
+}
+
+# Prints an expansion and its escape warnings; -c adds a newline after the
+# expanded format (not to it, so a format ending in "%" stays a "%").
+func emit(opts: Options, result: Expansion): void {
+    for (warning in result.warnings) {
+        complain(warning);
+    }
+    if (opts.format_given and !opts.printf) {
+        println(result.text);
+    } else {
+        print(result.text);
+    }
+}
+
+# The format for one file: the user's, else the terse or default one.
+func file_format(opts: Options, device: bool): string {
+    if (opts.format_given) {
+        return opts.format;
+    }
+    if (opts.terse) {
+        return TERSE_FILE_FORMAT;
+    }
+    return default_file_format(device);
+}
+
+func fs_format(opts: Options): string {
+    if (opts.format_given) {
+        return opts.format;
+    }
+    return if (opts.terse) { TERSE_FS_FORMAT } else { default_fs_format() };
+}
+
+# One FILE: true when it could be examined.
+func report_file(opts: Options, path: string): bool {
+    match file_status(path, opts.dereference) {
+        Ok(st) => {
+            let format = file_format(opts, is_device(st));
+            # Names are quoted only in user formats, as GNU stat does.
+            emit(opts, expand(format, FileFields(st, opts.format_given), opts.printf));
+            return true;
+        },
+        Err(code) => {
+            complain("cannot stat " + shell_quote(path) + ": " + errno_message(code));
+            return false;
+        },
+    }
+}
+
+func report_file_system(opts: Options, path: string): bool {
+    match fs_status(path) {
+        Ok(fs) => {
+            emit(opts, expand(fs_format(opts), FsFields(fs), opts.printf));
+            return true;
+        },
+        Err(code) => {
+            complain("cannot read file system information for " + shell_quote(path) + ": " + errno_message(code));
+            return false;
+        },
+    }
+}
+
+# --df: every listed file system, or the one holding each FILE.
+func run_df(opts: Options): int {
+    let mounts = read_mounts();
+    var rows: list[DfRow] = [];
+    var failed = false;
+    if (opts.operands.len() == 0) {
+        rows = listing_rows(mounts);
+    }
+    for (path in opts.operands) {
+        var found = false;
+        match mount_for(path, mounts) {
+            Some(m) => {
+                match fs_status(m.dir) {
+                    Ok(fs) => {
+                        rows.push(row_for(m, fs));
+                        found = true;
+                    },
+                    Err(code) => {
+                        complain(shell_quote(m.dir) + ": " + errno_message(code));
+                    },
+                }
+            },
+            None => {
+                complain(shell_quote(path) + ": can't find mount point");
+            },
+        }
+        if (!found) {
+            failed = true;
+        }
+    }
+    if (rows.len() > 0) {
+        for (line in df_table(rows)) {
+            println(line);
+        }
+    }
+    return if (failed) { EXIT_FAILURE } else { EXIT_OK };
+}
+
+pub func run_stat(opts: Options): int {
+    # The structs are only right on the platform they were written for;
+    # refuse to read garbage anywhere else.
+    let problems = layout_errors();
+    if (problems.len() > 0) {
+        for (problem in problems) {
+            complain(problem);
+        }
+        return EXIT_FAILURE;
+    }
+    load_time_zone();
+    if (opts.df) {
+        return run_df(opts);
+    }
+    if (opts.format_given) {
+        let problem = format_problem(opts.format);
+        if (problem != "") {
+            complain(problem);
+            return EXIT_FAILURE;
+        }
+    }
+    var ok = true;
+    for (path in opts.operands) {
+        let done = if (opts.file_system) { report_file_system(opts, path) } else { report_file(opts, path) };
+        if (!done) {
+            ok = false;
+        }
+    }
+    return if (ok) { EXIT_OK } else { EXIT_FAILURE };
+}

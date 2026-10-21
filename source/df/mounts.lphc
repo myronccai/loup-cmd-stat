@@ -1,0 +1,250 @@
+@mode(host.native)
+
+# The mount table and the --df listing: parsing /proc/self/mounts, finding
+# the mount that holds a file (also for %m), choosing which file systems a
+# listing shows, and the aligned df table.
+#
+# Runtime: host.native. Compiled into the native binary build/stat by
+# `make build` (Stage0 native build). parse_mounts(), df_row() and
+# df_table() are pure and tested with fixed text in tests/mounts_test.lphc;
+# the rest calls statvfs/stat through sys/libc.lphc.
+
+from io.fs import (exists);
+from sys.libc import (FsStatus, fs_status, device_of, resolved_path);
+
+pub const MOUNTS_FILE: string = "/proc/self/mounts";
+
+# One line of the mount table: what is mounted, where, and its type.
+pub class Mount {
+    pub let source: string;
+    pub let dir: string;
+    pub let kind: string;
+
+    new(source: string, dir: string, kind: string) {
+        this.source = source;
+        this.dir = dir;
+        this.kind = kind;
+    }
+}
+
+const OCTAL: string = "01234567";
+
+# The kernel writes a space, tab, newline or backslash inside a field as a
+# three-digit octal escape (`\040` for a space).
+pub func unescape_field(field: string): string {
+    if (!field.contains("\\")) {
+        return field;
+    }
+    let chars = field.chars();
+    var out: list[string] = [];
+    var i = 0;
+    while (i < chars.len()) {
+        if (chars[i] == "\\" and i + 3 < chars.len()
+                and OCTAL.contains(chars[i + 1]) and OCTAL.contains(chars[i + 2]) and OCTAL.contains(chars[i + 3])) {
+            let value = OCTAL.index_of(chars[i + 1]) * 64 + OCTAL.index_of(chars[i + 2]) * 8 + OCTAL.index_of(chars[i + 3]);
+            out.push(str(char.of(value)));
+            i += 4;
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    return out.join("");
+}
+
+# The lines of a mount table (fstab(5) format: source, directory, type,
+# options, then two numbers), in order. Lines with fewer than three fields
+# are skipped.
+pub func parse_mounts(text: string): list[Mount] {
+    var mounts: list[Mount] = [];
+    for (line in text.split("\n")) {
+        var fields: list[string] = [];
+        for (word in line.split(" ")) {
+            if (word != "") {
+                fields.push(word);
+            }
+        }
+        if (fields.len() >= 3) {
+            mounts.push(Mount(unescape_field(fields[0]), unescape_field(fields[1]), fields[2]));
+        }
+    }
+    return mounts;
+}
+
+pub func read_mounts(): list[Mount] {
+    if (!exists(MOUNTS_FILE)) {
+        let none: list[Mount] = [];
+        return none;
+    }
+    return parse_mounts(readText(MOUNTS_FILE));
+}
+
+# Whether `path` (absolute, resolved) is `dir` or lies below it.
+pub func within(path: string, dir: string): bool {
+    if (dir == "/" or path == dir) {
+        return true;
+    }
+    return path.startsWith(dir + "/");
+}
+
+# The mount that holds `path`: of the mounts on the same device, the one
+# with the longest directory that contains the resolved path (a device
+# mounted twice, or a bind mount, appears more than once); None when the
+# path cannot be examined.
+pub func mount_for(path: string, mounts: list[Mount]): Option[Mount] {
+    let device = device_of(path);
+    if (device < 0) {
+        return None;
+    }
+    let real = resolved_path(path);
+    var best: Option[Mount] = None;
+    var best_length = -1;
+    var fallback: Option[Mount] = None;
+    for (m in mounts) {
+        if (device_of(m.dir) == device) {
+            fallback = Some(m);
+            if (within(real, m.dir) and m.dir.len() > best_length) {
+                best = Some(m);
+                best_length = m.dir.len();
+            }
+        }
+    }
+    if (best_length >= 0) {
+        return best;
+    }
+    return fallback;
+}
+
+# One line of the df table, in 1024-byte blocks.
+pub class DfRow {
+    pub let source: string;
+    pub let dir: string;
+    pub let size_k: int;
+    pub let used_k: int;
+    pub let avail_k: int;
+    # Used / (used + available), rounded up; -1 when both are 0.
+    pub let percent: int;
+
+    new(source: string, dir: string, size_k: int, used_k: int, avail_k: int, percent: int) {
+        this.source = source;
+        this.dir = dir;
+        this.size_k = size_k;
+        this.used_k = used_k;
+        this.avail_k = avail_k;
+        this.percent = percent;
+    }
+}
+
+func kib(blocks: int, frsize: int): int {
+    let bytes = blocks * frsize;
+    return if (bytes % 1024 == 0) { bytes / 1024 } else { bytes / 1024 + 1 };
+}
+
+# The df numbers of a file system. "Used" is what is not free; the
+# percentage is of the space a normal user can have (used + available),
+# like df's, because the blocks reserved for root are in neither.
+pub func df_row(source: string, dir: string, blocks: int, bfree: int, bavail: int, frsize: int): DfRow {
+    let used = blocks - bfree;
+    let usable = used + bavail;
+    var percent = -1;
+    if (usable > 0) {
+        let scaled = used * 100;
+        percent = if (scaled % usable == 0) { scaled / usable } else { scaled / usable + 1 };
+    }
+    return DfRow(source, dir, kib(blocks, frsize), kib(used, frsize), kib(bavail, frsize), percent);
+}
+
+pub func row_for(m: Mount, fs: FsStatus): DfRow {
+    return df_row(m.source, m.dir, fs.blocks, fs.bfree, fs.bavail, fs.frsize);
+}
+
+# Types a full listing leaves out even though they have blocks:
+# read-only package images and the kernel's device directory.
+pub func hidden_kind(kind: string): bool {
+    return kind == "squashfs" or kind == "devtmpfs";
+}
+
+# The rows of a full listing: every mounted file system that has blocks,
+# is not hidden_kind(), and is not a device already listed (bind mounts
+# and second mounts show once). Mounts that cannot be examined are left
+# out.
+pub func listing_rows(mounts: list[Mount]): list[DfRow] {
+    var rows: list[DfRow] = [];
+    var seen: dict[string, bool] = {};
+    for (m in mounts) {
+        # The key is interpolated, not str(n): in the Stage0 native lane
+        # containsKey() does not find a key that str() built.
+        let device = i"{$ device_of(m.dir) $}";
+        if (hidden_kind(m.kind) or seen.containsKey(device)) {
+            continue;
+        }
+        seen[device] = true;
+        match fs_status(m.dir) {
+            Ok(fs) => {
+                if (fs.blocks > 0) {
+                    rows.push(row_for(m, fs));
+                }
+            },
+            Err(_) => {},
+        }
+    }
+    return rows;
+}
+
+func pad_left(text: string, width: int): string {
+    var out = text;
+    while (out.len() < width) {
+        out = " " + out;
+    }
+    return out;
+}
+
+func pad_right(text: string, width: int): string {
+    var out = text;
+    while (out.len() < width) {
+        out = out + " ";
+    }
+    return out;
+}
+
+func widest(header: string, cells: list[string]): int {
+    var width = header.len();
+    for (cell in cells) {
+        if (cell.len() > width) {
+            width = cell.len();
+        }
+    }
+    return width;
+}
+
+# The table, header first, each column as wide as its widest cell:
+# sources and mount points to the left, numbers to the right.
+pub func df_table(rows: list[DfRow]): list[string] {
+    var sources: list[string] = [];
+    var sizes: list[string] = [];
+    var used: list[string] = [];
+    var avail: list[string] = [];
+    var percents: list[string] = [];
+    for (row in rows) {
+        sources.push(row.source);
+        sizes.push(str(row.size_k));
+        used.push(str(row.used_k));
+        avail.push(str(row.avail_k));
+        percents.push(if (row.percent < 0) { "-" } else { str(row.percent) + "%" });
+    }
+    let w0 = widest("Filesystem", sources);
+    let w1 = widest("1K-blocks", sizes);
+    let w2 = widest("Used", used);
+    let w3 = widest("Available", avail);
+    let w4 = widest("Use%", percents);
+    var lines: list[string] = [];
+    lines.push(pad_right("Filesystem", w0) + " " + pad_left("1K-blocks", w1) + " " + pad_left("Used", w2)
+        + " " + pad_left("Available", w3) + " " + pad_left("Use%", w4) + " Mounted on");
+    var k = 0;
+    while (k < rows.len()) {
+        lines.push(pad_right(sources[k], w0) + " " + pad_left(sizes[k], w1) + " " + pad_left(used[k], w2)
+            + " " + pad_left(avail[k], w3) + " " + pad_left(percents[k], w4) + " " + rows[k].dir);
+        k += 1;
+    }
+    return lines;
+}

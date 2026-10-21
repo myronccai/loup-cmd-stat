@@ -1,0 +1,104 @@
+@mode(host.native)
+
+# Unit tests for stat's format engine (format/printf.lphc): directives with
+# flags, width and precision, seconds with decimals, unknown directives,
+# and --printf's backslash escapes. A small FieldSource stands in for a
+# file.
+#
+# Runtime: host.native, run by the test runner: `make test` runs
+# `loup-bootstrap test --native`, which compiles each `func test_*()` here
+# into its own native binary and runs it. Not part of build/stat.
+
+from debug.assert import (expect, expectEq);
+from helpers import (expect_text);
+from format.printf import (Field, FieldSource, Expansion, expand, format_problem, text_field,
+    decimal_field, octal_field, hex_field, seconds_field, unknown_field);
+
+# s = 3, a = 0644 (octal), f = 0x81b4, n = "sp ace", Y = 1792564034.099378729
+class Sample implements FieldSource {
+    pub func field(conversion: string): Field {
+        if (conversion == "s") {
+            return decimal_field(3u64);
+        } else if (conversion == "z0") {
+            return decimal_field(0u64);
+        } else if (conversion == "a") {
+            return octal_field(420u64);
+        } else if (conversion == "f") {
+            return hex_field(33204u64);
+        } else if (conversion == "n") {
+            return text_field("sp ace");
+        } else if (conversion == "Y") {
+            return seconds_field(1792564034, 99378729);
+        } else if (conversion == "Hd") {
+            return decimal_field(259u64);
+        }
+        return unknown_field();
+    }
+}
+
+func run(format: string): string {
+    return expand(format, Sample(), false).text;
+}
+
+func escaped(format: string): Expansion {
+    return expand(format, Sample(), true);
+}
+
+func test_plain_text_and_percent(): void {
+    expect_text(run("size %s bytes"), "size 3 bytes", "one directive");
+    expect_text(run("100%%"), "100%", "%%");
+    expect_text(run("[%Q]"), "[?]", "unknown directive");
+    expect_text(run("[%]"), "[?", "% then ] is an unknown directive");
+}
+
+func test_width_and_flags(): void {
+    expect_text(run("[%5s]"), "[    3]", "right-aligned");
+    expect_text(run("[%-5s]"), "[3    ]", "left-aligned");
+    expect_text(run("[%05s]"), "[00003]", "zero-padded");
+    expect_text(run("[%-05s]"), "[3    ]", "- wins over 0");
+    expect_text(run("[%+5s]"), "[    3]", "+ has no effect on unsigned values");
+    expect_text(run("[%.3s]"), "[003]", "precision: at least 3 digits");
+    expect_text(run("[%6.3s]"), "[   003]", "width and precision");
+    expect_text(run("[%5n]"), "[sp ace]", "a narrow width does not cut");
+    expect_text(run("[%.2n]"), "[sp]", "precision cuts text");
+    expect_text(run("[%-8n]"), "[sp ace  ]", "padded text");
+}
+
+func test_octal_and_hex(): void {
+    expect_text(run("%a"), "644", "octal");
+    expect_text(run("%#a"), "0644", "# adds a 0");
+    expect_text(run("%04a"), "0644", "zero-padded octal");
+    expect_text(run("%f"), "81b4", "hex");
+    expect_text(run("%#f"), "0x81b4", "# adds 0x");
+    expect_text(run("%Hd"), "259", "two-letter conversion");
+}
+
+func test_seconds(): void {
+    expect_text(run("%Y"), "1792564034", "whole seconds");
+    expect_text(run("%.3Y"), "1792564034.099", "three decimals");
+    expect_text(run("%.Y"), "1792564034.099378729", "a lone . means nine");
+    expect_text(run("%.0Y"), "1792564034", "no decimals");
+    expect_text(run("%.12Y"), "1792564034.099378729000", "more than nine");
+    expect_text(run("[%-16.2Y]"), "[1792564034.09   ]", "padded");
+}
+
+func test_escapes(): void {
+    expect_text(escaped("a\\tb\\n").text, "a\tb\n", "tab and newline");
+    expect_text(escaped("\\x41\\101\\\\\\\"").text, "AA\\\"", "hex, octal, backslash, quote");
+    expect_text(escaped("\\0").text, str(char.of(0)), "NUL");
+    expect_text(escaped("%n\\n").text, "sp ace\n", "with a directive");
+    let odd = escaped("<\\q>");
+    expect_text(odd.text, "<q>", "unknown escape: the letter");
+    expectEq(odd.warnings.len(), 1, "one warning");
+    expect_text(odd.warnings[0], "warning: unrecognized escape '\\q'", "warning text");
+    expect_text(escaped("\\045s").text, "%s", "an escaped % does not start a directive");
+    expect_text(run("a\\tb"), "a\\tb", "-c leaves backslashes alone");
+}
+
+func test_unfinished_directives(): void {
+    expect_text(run("50%"), "50%", "a lone % at the end");
+    expect_text(format_problem("%-"), "'%-': invalid directive", "flags only");
+    expect_text(format_problem("x %5"), "'%5': invalid directive", "width only");
+    expect_text(format_problem("%s %"), "", "a lone % is fine");
+    expect_text(format_problem("%n %%"), "", "valid");
+}

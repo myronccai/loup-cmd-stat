@@ -1,0 +1,86 @@
+@mode(host.native)
+
+# Unit tests for stat's C library layer (sys/libc.lphc) on files the tests
+# create: sizes, modes, links, link targets, standard input, errno
+# messages, user and group names, file-system status, and C text longer
+# than one 64-byte chunk.
+#
+# Runtime: host.native, run by the test runner: `make test` runs
+# `loup-bootstrap test --native`, which compiles each `func test_*()` here
+# into its own native binary and runs it in a fresh temporary directory,
+# where these tests create their files. Not part of build/stat.
+
+from debug.assert import (expect, expectEq);
+from helpers import (expect_text, make_file, make_hard_link, make_symlink, set_mode);
+from io.fs import (createDir);
+from sys.libc import (FileStatus, file_status, fs_status, link_target, resolved_path,
+    user_name, group_name, errno_message);
+
+func test_a_regular_file(): void {
+    make_file("f1234", 1234, 0o640);
+    let st = file_status("f1234", false).unwrap();
+    expectEq(st.size, 1234, "size");
+    expectEq(st.mode & 0o7777, 0o640, "permission bits");
+    expectEq(st.mode & 0o170000, 0o100000, "a regular file");
+    expectEq(st.nlink as int, 1, "one link");
+    expect(st.blocks >= 0, "blocks");
+    expect(st.mtime_sec > 1000000000, "a modification time after 2001");
+    expect(st.mtime_nsec >= 0 and st.mtime_nsec < 1000000000, "nanoseconds");
+}
+
+func test_links_and_targets(): void {
+    make_file("orig", 10, 0o644);
+    make_hard_link("orig", "twin");
+    expectEq(file_status("orig", false).unwrap().nlink as int, 2, "two links");
+    make_symlink("orig", "sym");
+    let link = file_status("sym", false).unwrap();
+    expectEq(link.mode & 0o170000, 0o120000, "lstat: the link");
+    expect_text(link.link_target, "orig", "its target");
+    let followed = file_status("sym", true).unwrap();
+    expectEq(followed.size, 10, "stat: the file");
+    expect_text(followed.link_target, "", "no target once followed");
+}
+
+func test_long_link_target(): void {
+    # 150 bytes: three chunks of C text.
+    let target = "a".repeat(60) + "/" + "b".repeat(60) + "/" + "c".repeat(28);
+    make_symlink(target, "long");
+    expect_text(link_target("long"), target, "the whole target");
+}
+
+func test_directories(): void {
+    createDir("d/e");
+    set_mode("d", 0o751);
+    let st = file_status("d", false).unwrap();
+    expectEq(st.mode & 0o170000, 0o040000, "a directory");
+    expectEq(st.mode & 0o7777, 0o751, "its mode");
+    expect(resolved_path("d/e/..").endsWith("/d"), "realpath resolves ..");
+}
+
+func test_errors(): void {
+    match file_status("missing", false) {
+        Ok(_) => { expect(false, "should fail"); },
+        Err(code) => {
+            expectEq(code, 2, "ENOENT");
+            expect_text(errno_message(code), "No such file or directory", "strerror");
+        },
+    }
+    make_file("plain", 1, 0o644);
+    match file_status("plain/x", false) {
+        Ok(_) => { expect(false, "should fail"); },
+        Err(code) => { expect_text(errno_message(code), "Not a directory", "ENOTDIR"); },
+    }
+}
+
+func test_root_has_a_name(): void {
+    expect_text(user_name(0).unwrap_or("?"), "root", "uid 0");
+    expect_text(group_name(0).unwrap_or("?"), "root", "gid 0");
+    expect(user_name(2147480000).is_none(), "no such user");
+}
+
+func test_file_system(): void {
+    let fs = fs_status(".").unwrap();
+    expect(fs.blocks > 0 and fs.bsize > 0 and fs.namemax > 0, "statvfs numbers");
+    expect(fs.bfree <= fs.blocks and fs.bavail <= fs.bfree, "free <= total");
+    expect(fs_status("missing").is_err(), "a missing path");
+}

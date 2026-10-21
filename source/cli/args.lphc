@@ -1,0 +1,223 @@
+@mode(host.native)
+
+# Command-line parsing for stat: GNU stat's options plus --df, with
+# getopt_long's rules (bundled short flags, `-cFORMAT` or `-c FORMAT`,
+# `--name=value` or `--name value`, unambiguous prefixes of long names,
+# options after operands, `--` to end them).
+#
+# Runtime: host.native. Compiled into the native binary build/stat by
+# `make build` (Stage0 native build). Pure functions; tests/args_test.lphc
+# checks them in native test binaries.
+#
+# Structure: Options, the option table (OptionSpec), then parse_args():
+# one loop that turns each word into option events and hands them to
+# set_option().
+
+# Everything the command line says. A class: records that cross modules
+# are classes in this code base (see AGENTS.md).
+pub class Options {
+    pub var dereference: bool = false;
+    pub var file_system: bool = false;
+    pub var terse: bool = false;
+    # -c / --format or --printf; `printf` tells which (escapes, no newline).
+    pub var format: string = "";
+    pub var format_given: bool = false;
+    pub var printf: bool = false;
+    # --cached=WHEN is accepted for compatibility and has no effect: stat(2)
+    # has no cache to bypass.
+    pub var cached: string = "default";
+    pub var df: bool = false;
+    pub var help: bool = false;
+    pub var version: bool = false;
+    pub var operands: list[string] = [];
+}
+
+# One option: its long name (for --name), its short letter ("" if none),
+# and whether it takes a value.
+class OptionSpec {
+    pub let long_name: string;
+    pub let short: string;
+    pub let takes_value: bool;
+
+    new(long_name: string, short: string, takes_value: bool) {
+        this.long_name = long_name;
+        this.short = short;
+        this.takes_value = takes_value;
+    }
+}
+
+func option_table(): list[OptionSpec] {
+    return [
+        OptionSpec("dereference", "L", false),
+        OptionSpec("file-system", "f", false),
+        OptionSpec("cached", "", true),
+        OptionSpec("format", "c", true),
+        OptionSpec("printf", "", true),
+        OptionSpec("terse", "t", false),
+        OptionSpec("df", "", false),
+        OptionSpec("help", "", false),
+        OptionSpec("version", "", false),
+    ];
+}
+
+func by_short(letter: string): Option[OptionSpec] {
+    for (spec in option_table()) {
+        if (spec.short == letter) {
+            return Some(spec);
+        }
+    }
+    return None;
+}
+
+# The spec a long name (or a unique prefix of one) means; Err with
+# getopt's message.
+func by_long(name: string, word: string): Result[OptionSpec, string] {
+    var candidates: list[OptionSpec] = [];
+    for (spec in option_table()) {
+        if (spec.long_name == name) {
+            return Ok(spec);
+        }
+        if (spec.long_name.startsWith(name)) {
+            candidates.push(spec);
+        }
+    }
+    if (candidates.len() == 1) {
+        return Ok(candidates[0]);
+    }
+    if (candidates.len() == 0) {
+        return Err(i"unrecognized option '{$ word $}'");
+    }
+    var listed: list[string] = [];
+    for (spec in candidates) {
+        listed.push("'--" + spec.long_name + "'");
+    }
+    let names = listed.join(" ");
+    return Err(i"option '--{$ name $}' is ambiguous; possibilities: {$ names $}");
+}
+
+const CACHED_VALUES: string = "default never always";
+
+# --cached takes one of three words, or a unique prefix of one.
+func cached_value(value: string): Result[string, string] {
+    var matches: list[string] = [];
+    for (word in CACHED_VALUES.split(" ")) {
+        if (word == value) {
+            return Ok(word);
+        }
+        if (value != "" and word.startsWith(value)) {
+            matches.push(word);
+        }
+    }
+    if (matches.len() == 1) {
+        return Ok(matches[0]);
+    }
+    let why = if (matches.len() == 0) { "invalid" } else { "ambiguous" };
+    return Err(i"{$ why $} argument '{$ value $}' for '--cached'" + "\n"
+        + "Valid arguments are:\n  - 'default'\n  - 'never'\n  - 'always'");
+}
+
+# Applies one option; "" or an error message.
+func set_option(edits opts: Options, spec: OptionSpec, value: string): string {
+    let name = spec.long_name;
+    if (name == "dereference") {
+        safe { opts.dereference = true; }
+    } else if (name == "file-system") {
+        safe { opts.file_system = true; }
+    } else if (name == "terse") {
+        safe { opts.terse = true; }
+    } else if (name == "format" or name == "printf") {
+        safe {
+            opts.format = value;
+            opts.format_given = true;
+            opts.printf = name == "printf";
+        }
+    } else if (name == "cached") {
+        match cached_value(value) {
+            Ok(word) => { safe { opts.cached = word; } },
+            Err(msg) => { return msg; },
+        }
+    } else if (name == "df") {
+        safe { opts.df = true; }
+    } else if (name == "help") {
+        safe { opts.help = true; }
+    } else if (name == "version") {
+        safe { opts.version = true; }
+    }
+    return "";
+}
+
+# Parses stat's arguments. Err carries the message for "stat: MESSAGE"
+# (every one of them is followed by the usage hint).
+pub func parse_args(argv: list[string]): Result[Options, string] {
+    var opts = Options();
+    var i = 0;
+    var options_done = false;
+    while (i < argv.len()) {
+        let word = argv[i];
+        i += 1;
+        if (options_done or word == "-" or !word.startsWith("-")) {
+            safe { opts.operands.push(word); }
+        } else if (word == "--") {
+            options_done = true;
+        } else if (word.startsWith("--")) {
+            let body = word.slice(2, word.len());
+            let eq = body.index_of("=");
+            let name = if (eq < 0) { body } else { body.slice(0, eq) };
+            var spec = OptionSpec("", "", false);
+            match by_long(name, word) {
+                Ok(found) => { spec = found; },
+                Err(msg) => { return Err(msg); },
+            }
+            var value = "";
+            if (eq >= 0) {
+                if (!spec.takes_value) {
+                    return Err(i"option '--{$ spec.long_name $}' doesn't allow an argument");
+                }
+                value = body.slice(eq + 1, body.len());
+            } else if (spec.takes_value) {
+                if (i >= argv.len()) {
+                    return Err(i"option '--{$ spec.long_name $}' requires an argument");
+                }
+                value = argv[i];
+                i += 1;
+            }
+            let problem = set_option(edits: opts, spec, value);
+            if (problem != "") {
+                return Err(problem);
+            }
+        } else {
+            # Short options: flags bundle; -c takes the rest of the word,
+            # or the next word.
+            var k = 1;
+            while (k < word.len()) {
+                let letter = word.slice(k, k + 1);
+                k += 1;
+                var spec = OptionSpec("", "", false);
+                match by_short(letter) {
+                    Some(found) => { spec = found; },
+                    None => { return Err(i"invalid option -- '{$ letter $}'"); },
+                }
+                var value = "";
+                if (spec.takes_value) {
+                    if (k < word.len()) {
+                        value = word.slice(k, word.len());
+                    } else if (i < argv.len()) {
+                        value = argv[i];
+                        i += 1;
+                    } else {
+                        return Err(i"option requires an argument -- '{$ letter $}'");
+                    }
+                    k = word.len();
+                }
+                let problem = set_option(edits: opts, spec, value);
+                if (problem != "") {
+                    return Err(problem);
+                }
+            }
+        }
+    }
+    if (!opts.help and !opts.version and !opts.df and opts.operands.len() == 0) {
+        return Err("missing operand");
+    }
+    return Ok(opts);
+}

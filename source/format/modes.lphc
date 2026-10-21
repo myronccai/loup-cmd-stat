@@ -1,0 +1,211 @@
+@mode(host.native)
+
+# stat's readings of raw numbers: file types and permission strings from
+# st_mode, device major and minor numbers from dev_t, file-system type
+# names from statfs's magic numbers, and numbers in octal and hex.
+#
+# Runtime: host.native. Compiled into the native binary build/stat by
+# `make build` (Stage0 native build). Pure functions;
+# tests/modes_test.lphc checks them in native test binaries.
+
+const S_IFMT: int = 0o170000;
+const S_IFSOCK: int = 0o140000;
+const S_IFLNK: int = 0o120000;
+const S_IFREG: int = 0o100000;
+const S_IFBLK: int = 0o060000;
+const S_IFDIR: int = 0o040000;
+const S_IFCHR: int = 0o020000;
+const S_IFIFO: int = 0o010000;
+
+pub func file_kind(mode: int): int {
+    return mode & S_IFMT;
+}
+
+pub func is_link_mode(mode: int): bool {
+    return file_kind(mode) == S_IFLNK;
+}
+
+pub func is_device_mode(mode: int): bool {
+    let kind = file_kind(mode);
+    return kind == S_IFCHR or kind == S_IFBLK;
+}
+
+# %F: the type in words, as GNU stat names it.
+pub func file_type_name(mode: int, size: int): string {
+    let kind = file_kind(mode);
+    if (kind == S_IFREG) {
+        return if (size == 0) { "regular empty file" } else { "regular file" };
+    } else if (kind == S_IFDIR) {
+        return "directory";
+    } else if (kind == S_IFLNK) {
+        return "symbolic link";
+    } else if (kind == S_IFIFO) {
+        return "fifo";
+    } else if (kind == S_IFSOCK) {
+        return "socket";
+    } else if (kind == S_IFCHR) {
+        return "character special file";
+    } else if (kind == S_IFBLK) {
+        return "block special file";
+    }
+    return "weird file";
+}
+
+func type_letter(mode: int): string {
+    let kind = file_kind(mode);
+    if (kind == S_IFREG) {
+        return "-";
+    } else if (kind == S_IFDIR) {
+        return "d";
+    } else if (kind == S_IFLNK) {
+        return "l";
+    } else if (kind == S_IFCHR) {
+        return "c";
+    } else if (kind == S_IFBLK) {
+        return "b";
+    } else if (kind == S_IFIFO) {
+        return "p";
+    } else if (kind == S_IFSOCK) {
+        return "s";
+    }
+    return "?";
+}
+
+# One rwx triple; `special` is the set-id or sticky bit that shares the
+# execute position (shown as `on_exec` with x, `alone` without it).
+func triple(mode: int, shift: int, special: bool, on_exec: string, alone: string): string {
+    let bits = (mode >> shift) & 7;
+    let r = if ((bits & 4) != 0) { "r" } else { "-" };
+    let w = if ((bits & 2) != 0) { "w" } else { "-" };
+    let exec = (bits & 1) != 0;
+    var x = if (exec) { "x" } else { "-" };
+    if (special) {
+        x = if (exec) { on_exec } else { alone };
+    }
+    return r + w + x;
+}
+
+# %A: "-rw-r--r--", "drwxrwxrwt", "-rwsr-xr-x".
+pub func mode_string(mode: int): string {
+    let user = triple(mode, 6, (mode & 0o4000) != 0, "s", "S");
+    let group = triple(mode, 3, (mode & 0o2000) != 0, "s", "S");
+    let other = triple(mode, 0, (mode & 0o1000) != 0, "t", "T");
+    return type_letter(mode) + user + group + other;
+}
+
+# glibc's dev_t encoding (<sys/sysmacros.h>): 12 bits of major and 20 of
+# minor, split across the 64 bits for compatibility with 16-bit dev_t.
+pub func major_of(dev: uint64): uint64 {
+    return ((dev >> 8u64) & 0xfffu64) | ((dev >> 32u64) & 0xfffff000u64);
+}
+
+pub func minor_of(dev: uint64): uint64 {
+    return (dev & 0xffu64) | ((dev >> 12u64) & 0xffffff00u64);
+}
+
+const HEX: string = "0123456789abcdef";
+
+# `value` in base 8 or 16 (unsigned, all 64 bits), without a prefix.
+pub func in_base(value: uint64, base: uint64): string {
+    if (value == 0u64) {
+        return "0";
+    }
+    var digits: list[string] = [];
+    var n = value;
+    while (n > 0u64) {
+        let d = (n % base) as int;
+        digits.push(HEX.slice(d, d + 1));
+        n = n / base;
+    }
+    var out: list[string] = [];
+    var k = digits.len() - 1;
+    while (k >= 0) {
+        out.push(digits[k]);
+        k -= 1;
+    }
+    return out.join("");
+}
+
+# %T with -f: GNU's name for a statfs f_type magic number (the common
+# Linux file systems), else "UNKNOWN (0x...)".
+pub func fs_type_name(magic: int): string {
+    let m = magic & 0xFFFFFFFF;
+    if (m == 0xEF53) {
+        return "ext2/ext3";
+    } else if (m == 0x01021994) {
+        return "tmpfs";
+    } else if (m == 0x9123683E) {
+        return "btrfs";
+    } else if (m == 0x58465342) {
+        return "xfs";
+    } else if (m == 0x9FA0) {
+        return "proc";
+    } else if (m == 0x62656572) {
+        return "sysfs";
+    } else if (m == 0x1CD1) {
+        return "devpts";
+    } else if (m == 0x63677270) {
+        return "cgroup2fs";
+    } else if (m == 0x27E0EB) {
+        return "cgroupfs";
+    } else if (m == 0x794C7630) {
+        return "overlayfs";
+    } else if (m == 0x6969) {
+        return "nfs";
+    } else if (m == 0x4D44) {
+        return "msdos";
+    } else if (m == 0x2011BAB0) {
+        return "exfat";
+    } else if (m == 0x5346544E) {
+        return "ntfs";
+    } else if (m == 0x73717368) {
+        return "squashfs";
+    } else if (m == 0x9660) {
+        return "isofs";
+    } else if (m == 0x15013346) {
+        return "udf";
+    } else if (m == 0x65735546) {
+        return "fuseblk";
+    } else if (m == 0x65735543) {
+        return "fusectl";
+    } else if (m == 0x2FC12FC1) {
+        return "zfs";
+    } else if (m == 0xF2F52010) {
+        return "f2fs";
+    } else if (m == 0x0187) {
+        return "autofs";
+    } else if (m == 0x64626720) {
+        return "debugfs";
+    } else if (m == 0x74726163) {
+        return "tracefs";
+    } else if (m == 0x73636673) {
+        return "securityfs";
+    } else if (m == 0x6165676C) {
+        return "pstorefs";
+    } else if (m == 0xCAFE4A11) {
+        return "bpf_fs";
+    } else if (m == 0x958458F6) {
+        return "hugetlbfs";
+    } else if (m == 0x19800202) {
+        return "mqueue";
+    } else if (m == 0x62656570) {
+        return "configfs";
+    } else if (m == 0xDE5E81E4) {
+        return "efivarfs";
+    } else if (m == 0x42494E4D) {
+        return "binfmt_misc";
+    } else if (m == 0x858458F6) {
+        return "ramfs";
+    } else if (m == 0x6E736673) {
+        return "nsfs";
+    } else if (m == 0xFF534D42) {
+        return "cifs";
+    } else if (m == 0xFE534D42) {
+        return "smb2";
+    } else if (m == 0x01161970) {
+        return "gfs/gfs2";
+    } else if (m == 0x5A3C69F0) {
+        return "aafs";
+    }
+    return "UNKNOWN (0x" + in_base(m as uint64, 16u64) + ")";
+}

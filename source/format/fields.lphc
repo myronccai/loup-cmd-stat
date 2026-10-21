@@ -1,0 +1,247 @@
+@mode(host.native)
+
+# What each stat directive means: the FieldSource for a file (FileFields)
+# and for a file system (FsFields), GNU stat's default and terse formats,
+# and the shell quoting of %N.
+#
+# Runtime: host.native. Compiled into the native binary build/stat by
+# `make build` (Stage0 native build). tests/fields_test.lphc expands
+# formats over hand-made statuses in native test binaries; only %U, %G and
+# %m reach the C library (through sys/libc.lphc and df/mounts.lphc), and
+# only when a format uses them.
+
+from df.mounts import (Mount, mount_for, read_mounts);
+from format.modes import (mode_string, file_type_name, is_link_mode, is_device_mode,
+    major_of, minor_of, fs_type_name);
+from format.printf import (Field, FieldSource, text_field, decimal_field, octal_field,
+    hex_field, seconds_field, unknown_field);
+from sys.clock import (local_time_text);
+from sys.libc import (FileStatus, FsStatus, user_name, group_name);
+
+# GNU stat's default report for a file (a device file adds its device
+# type to the third line).
+pub func default_file_format(device: bool): string {
+    let third = if (device) {
+        "Device: %Hd,%Ld\tInode: %-11i Links: %-5h Device type: %Hr,%Lr\n"
+    } else {
+        "Device: %Hd,%Ld\tInode: %-11i Links: %h\n"
+    };
+    return "  File: %N\n" + "  Size: %-10s\tBlocks: %-10b IO Block: %-6o %F\n" + third
+        + "Access: (%04a/%10.10A)  Uid: (%5u/%8U)   Gid: (%5g/%8G)\n"
+        + "Access: %x\n" + "Modify: %y\n" + "Change: %z\n" + " Birth: %w\n";
+}
+
+pub func default_fs_format(): string {
+    return "  File: \"%n\"\n" + "    ID: %-8i Namelen: %-7l Type: %T\n"
+        + "Block size: %-10s Fundamental block size: %S\n"
+        + "Blocks: Total: %-10b Free: %-10f Available: %a\n"
+        + "Inodes: Total: %-10c Free: %d\n";
+}
+
+pub const TERSE_FILE_FORMAT: string = "%n %s %b %f %u %g %D %i %h %t %T %X %Y %Z %W %o\n";
+pub const TERSE_FS_FORMAT: string = "%n %i %l %t %s %S %b %f %a %c %d\n";
+
+const SHELL_SPECIAL: string = "\"$`\\!";
+
+# GNU's shell-escape-always quoting, as %N and the error messages use it:
+# 'name'; "it's" when the name has a single quote but nothing a double-
+# quoted shell word would expand; otherwise 'it'\''s'.
+pub func shell_quote(name: string): string {
+    if (!name.contains("'")) {
+        return "'" + name + "'";
+    }
+    var plain = true;
+    for (c in name) {
+        if (SHELL_SPECIAL.contains(c)) {
+            plain = false;
+        }
+    }
+    if (plain) {
+        return "\"" + name + "\"";
+    }
+    return "'" + name.replace("'", "'\\''") + "'";
+}
+
+func owner_text(name: Option[string]): string {
+    match name {
+        Some(n) => { return n; },
+        None => { return "UNKNOWN"; },
+    }
+}
+
+# The directives of a file. User and group names and the mount point are
+# looked up the first time a format asks for them.
+pub class FileFields implements FieldSource {
+    let st: FileStatus;
+    # %N quotes names (-c, --printf); the default report prints them as is.
+    let quoted: bool;
+    var user: string = "";
+    var group: string = "";
+    var looked_up: bool = false;
+
+    new(st: FileStatus, quoted: bool) {
+        this.st = st;
+        this.quoted = quoted;
+    }
+
+    modifier func look_up(): void {
+        if (!this.looked_up) {
+            this.user = owner_text(user_name(this.st.uid));
+            this.group = owner_text(group_name(this.st.gid));
+            this.looked_up = true;
+        }
+    }
+
+    func quoted_name(): string {
+        let shown = if (this.quoted) { shell_quote(this.st.name) } else { this.st.name };
+        if (is_link_mode(this.st.mode) and this.st.link_target != "") {
+            let target = if (this.quoted) { shell_quote(this.st.link_target) } else { this.st.link_target };
+            return shown + " -> " + target;
+        }
+        return shown;
+    }
+
+    func mount_point(): string {
+        match mount_for(this.st.name, read_mounts()) {
+            Some(m) => { return m.dir; },
+            None => { return "?"; },
+        }
+    }
+
+    pub func field(conversion: string): Field {
+        let info = this.st;
+        let c = conversion;
+        if (c == "a") {
+            return octal_field((info.mode & 0o7777) as uint64);
+        } else if (c == "A") {
+            return text_field(mode_string(info.mode));
+        } else if (c == "b") {
+            return decimal_field(info.blocks as uint64);
+        } else if (c == "B") {
+            return decimal_field(512u64);
+        } else if (c == "d") {
+            return decimal_field(info.dev);
+        } else if (c == "D") {
+            return hex_field(info.dev);
+        } else if (c == "Hd") {
+            return decimal_field(major_of(info.dev));
+        } else if (c == "Ld") {
+            return decimal_field(minor_of(info.dev));
+        } else if (c == "f") {
+            return hex_field(info.mode as uint64);
+        } else if (c == "F") {
+            return text_field(file_type_name(info.mode, info.size));
+        } else if (c == "g") {
+            return decimal_field(info.gid as uint64);
+        } else if (c == "G") {
+            safe { this.look_up(); }
+            return text_field(this.group);
+        } else if (c == "h") {
+            return decimal_field(info.nlink);
+        } else if (c == "i") {
+            return decimal_field(info.ino);
+        } else if (c == "m") {
+            return text_field(this.mount_point());
+        } else if (c == "n") {
+            return text_field(info.name);
+        } else if (c == "N") {
+            return text_field(this.quoted_name());
+        } else if (c == "o") {
+            return decimal_field(info.blksize as uint64);
+        } else if (c == "r") {
+            return decimal_field(info.rdev);
+        } else if (c == "R") {
+            return hex_field(info.rdev);
+        } else if (c == "Hr") {
+            return decimal_field(major_of(info.rdev));
+        } else if (c == "Lr") {
+            return decimal_field(minor_of(info.rdev));
+        } else if (c == "t") {
+            return hex_field(major_of(info.rdev));
+        } else if (c == "T") {
+            return hex_field(minor_of(info.rdev));
+        } else if (c == "s") {
+            return decimal_field(info.size as uint64);
+        } else if (c == "u") {
+            return decimal_field(info.uid as uint64);
+        } else if (c == "U") {
+            safe { this.look_up(); }
+            return text_field(this.user);
+        }
+        return time_field(info, c);
+    }
+}
+
+# %w %x %y %z (local time) and %W %X %Y %Z (seconds); anything else is
+# not a directive.
+func time_field(st: FileStatus, c: string): Field {
+    if (c == "w") {
+        if (!st.has_birth) {
+            return text_field("-");
+        }
+        return text_field(local_time_text(st.btime_sec, st.btime_nsec));
+    } else if (c == "W") {
+        if (!st.has_birth) {
+            return seconds_field(0, 0);
+        }
+        return seconds_field(st.btime_sec, st.btime_nsec);
+    } else if (c == "x") {
+        return text_field(local_time_text(st.atime_sec, st.atime_nsec));
+    } else if (c == "X") {
+        return seconds_field(st.atime_sec, st.atime_nsec);
+    } else if (c == "y") {
+        return text_field(local_time_text(st.mtime_sec, st.mtime_nsec));
+    } else if (c == "Y") {
+        return seconds_field(st.mtime_sec, st.mtime_nsec);
+    } else if (c == "z") {
+        return text_field(local_time_text(st.ctime_sec, st.ctime_nsec));
+    } else if (c == "Z") {
+        return seconds_field(st.ctime_sec, st.ctime_nsec);
+    }
+    return unknown_field();
+}
+
+# Whether the default report of `st` is the device-file one.
+pub func is_device(st: FileStatus): bool {
+    return is_device_mode(st.mode);
+}
+
+# The directives of a file system (stat -f).
+pub class FsFields implements FieldSource {
+    let fs: FsStatus;
+
+    new(fs: FsStatus) {
+        this.fs = fs;
+    }
+
+    pub func field(conversion: string): Field {
+        let fs = this.fs;
+        let c = conversion;
+        if (c == "a") {
+            return decimal_field(fs.bavail as uint64);
+        } else if (c == "b") {
+            return decimal_field(fs.blocks as uint64);
+        } else if (c == "c") {
+            return decimal_field(fs.files as uint64);
+        } else if (c == "d") {
+            return decimal_field(fs.ffree as uint64);
+        } else if (c == "f") {
+            return decimal_field(fs.bfree as uint64);
+        } else if (c == "i") {
+            return hex_field(fs.fsid);
+        } else if (c == "l") {
+            return decimal_field(fs.namemax as uint64);
+        } else if (c == "n") {
+            return text_field(fs.name);
+        } else if (c == "s") {
+            return decimal_field(fs.bsize as uint64);
+        } else if (c == "S") {
+            return decimal_field(fs.frsize as uint64);
+        } else if (c == "t") {
+            return hex_field((fs.fs_kind & 0xFFFFFFFF) as uint64);
+        } else if (c == "T") {
+            return text_field(fs_type_name(fs.fs_kind));
+        }
+        return unknown_field();
+    }
+}

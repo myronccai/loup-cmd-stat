@@ -1,0 +1,97 @@
+@mode(host.native)
+
+# The --help text and the --version line of stat.
+#
+# Runtime: host.native. Compiled into the native binary build/stat by
+# `make build` (Stage0 native build); tests/app_test.lphc prints both
+# through run().
+
+from appinfo import (APP_NAME, APP_VERSION, APP_SUMMARY);
+
+pub func usage(): string {
+    # A list of lines rather than a multiline string: the help mentions
+    # backslash escapes, and backslashes inside multiline strings differ
+    # between the Loup toolchains.
+    let lines = [
+        i"Usage: {$ APP_NAME $} [OPTION]... FILE...",
+        i"  or:  {$ APP_NAME $} --df [FILE]...",
+        APP_SUMMARY,
+        "",
+        "Mandatory arguments to long options are mandatory for short options too.",
+        "  -L, --dereference     follow links",
+        "  -f, --file-system     display file system status instead of file status",
+        "      --cached=MODE     accepted for compatibility (always, never, default);",
+        "                          has no effect",
+        "  -c  --format=FORMAT   use the specified FORMAT instead of the default;",
+        "                          output a newline after each use of FORMAT",
+        "      --printf=FORMAT   like --format, but interpret backslash escapes,",
+        "                          and do not output a mandatory trailing newline;",
+        "                          if you want a newline, include \\n in FORMAT",
+        "  -t, --terse           print the information in terse form",
+        "      --df              list mounted file systems (or those holding FILEs)",
+        "                          with their size, use and free space in 1K blocks",
+        "      --help        display this help and exit",
+        "      --version     output version information and exit",
+        "",
+        "The valid format sequences for files (without --file-system):",
+        "",
+        "  %a   permission bits in octal (see '#' and '0' printf flags)",
+        "  %A   permission bits and file type in human readable form",
+        "  %b   number of blocks allocated (see %B)",
+        "  %B   the size in bytes of each block reported by %b",
+        "  %d   device number in decimal (st_dev)",
+        "  %D   device number in hex (st_dev)",
+        "  %Hd  major device number in decimal",
+        "  %Ld  minor device number in decimal",
+        "  %f   raw mode in hex",
+        "  %F   file type",
+        "  %g   group ID of owner",
+        "  %G   group name of owner",
+        "  %h   number of hard links",
+        "  %i   inode number",
+        "  %m   mount point",
+        "  %n   file name",
+        "  %N   quoted file name with dereference if symbolic link",
+        "  %o   optimal I/O transfer size hint",
+        "  %s   total size, in bytes",
+        "  %r   device type in decimal (st_rdev)",
+        "  %R   device type in hex (st_rdev)",
+        "  %Hr  major device type in decimal, for character/block device special files",
+        "  %Lr  minor device type in decimal, for character/block device special files",
+        "  %t   major device type in hex, for character/block device special files",
+        "  %T   minor device type in hex, for character/block device special files",
+        "  %u   user ID of owner",
+        "  %U   user name of owner",
+        "  %w   time of file birth, human-readable; - if unknown",
+        "  %W   time of file birth, seconds since Epoch; 0 if unknown",
+        "  %x   time of last access, human-readable",
+        "  %X   time of last access, seconds since Epoch",
+        "  %y   time of last data modification, human-readable",
+        "  %Y   time of last data modification, seconds since Epoch",
+        "  %z   time of last status change, human-readable",
+        "  %Z   time of last status change, seconds since Epoch",
+        "",
+        "Valid format sequences for file systems:",
+        "",
+        "  %a   free blocks available to non-superuser",
+        "  %b   total data blocks in file system",
+        "  %c   total file nodes in file system",
+        "  %d   free file nodes in file system",
+        "  %f   free blocks in file system",
+        "  %i   file system ID in hex",
+        "  %l   maximum length of filenames",
+        "  %n   file name",
+        "  %s   block size (for faster transfers)",
+        "  %S   fundamental block size (for block counts)",
+        "  %t   file system type in hex",
+        "  %T   file system type in human readable form",
+        "",
+        "Times are in the local time zone (TZ). Linux on x86-64 with glibc only:",
+        "the program checks its C struct layouts at start-up.",
+    ];
+    return lines.join("\n");
+}
+
+pub func version_line(): string {
+    return i"{$ APP_NAME $} (loup-cmd-{$ APP_NAME $}) {$ APP_VERSION $}";
+}

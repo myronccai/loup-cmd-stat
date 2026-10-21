@@ -1,0 +1,65 @@
+@mode(host.native)
+
+# Unit tests for stat's argument parser (cli/args.lphc).
+#
+# Runtime: host.native, run by the test runner: `make test` runs
+# `loup-bootstrap test --native`, which compiles each `func test_*()` here
+# into its own native binary and runs it. Not part of build/stat.
+
+from debug.assert import (expect, expectEq);
+from helpers import (expect_text);
+from cli.args import (Options, parse_args);
+
+func parsed(argv: list[string]): Options {
+    return parse_args(argv).unwrap();
+}
+
+func message(argv: list[string]): string {
+    match parse_args(argv) {
+        Ok(_) => { return "ok"; },
+        Err(msg) => { return msg; },
+    }
+}
+
+func test_flags_and_operands(): void {
+    let opts = parsed(["-L", "a", "-f", "b"]);
+    expect(opts.dereference and opts.file_system, "-L -f, also after an operand");
+    expectEq(opts.operands.len(), 2, "two operands");
+    expect(parsed(["-Lft", "x"]).terse, "bundled");
+    expect_text(parsed(["--", "-L"]).operands[0], "-L", "after --");
+    expect_text(parsed(["-"]).operands[0], "-", "standard input");
+}
+
+func test_formats(): void {
+    let c = parsed(["-c", "%n %s", "x"]);
+    expect(c.format_given and !c.printf, "-c");
+    expect_text(c.format, "%n %s", "its format");
+    expect_text(parsed(["-c%s", "x"]).format, "%s", "attached value");
+    expect_text(parsed(["--format=%a", "x"]).format, "%a", "--format=");
+    expect_text(parsed(["--form", "%a", "x"]).format, "%a", "prefix and separate value");
+    let p = parsed(["--printf=%n\\n", "x"]);
+    expect(p.printf, "--printf");
+    expect_text(parsed(["-c", "%a", "--printf", "%b", "x"]).format, "%b", "the last format wins");
+}
+
+func test_df_and_cached(): void {
+    let none: list[string] = [];
+    expect_text(message(none), "missing operand", "no operand");
+    expect(parsed(["--df"]).df, "--df needs no operand");
+    expect_text(parsed(["--cached=nev", "x"]).cached, "never", "a prefix of never");
+    expect(message(["--cached=x", "y"]).startsWith("invalid argument 'x' for '--cached'"), "bad --cached");
+}
+
+func test_errors(): void {
+    expect_text(message(["-q", "x"]), "invalid option -- 'q'", "unknown short");
+    expect_text(message(["--bogus", "x"]), "unrecognized option '--bogus'", "unknown long");
+    expect_text(message(["-c"]), "option requires an argument -- 'c'", "missing -c value");
+    expect_text(message(["--format"]), "option '--format' requires an argument", "missing --format value");
+    expect_text(message(["--terse=1", "x"]), "option '--terse' doesn't allow an argument", "value on a flag");
+    expect_text(message(["--d", "x"]), "option '--d' is ambiguous; possibilities: '--dereference' '--df'", "ambiguous");
+}
+
+func test_help_version(): void {
+    expect(parsed(["--help"]).help, "--help without operands");
+    expect(parsed(["--vers"]).version, "--version by prefix");
+}

@@ -1,0 +1,45 @@
+@mode(host.native)
+
+# Unit tests for stat's local time (sys/clock.lphc): the C library's
+# conversion under time zones the tests set with setenv("TZ", ...).
+#
+# Runtime: host.native, run by the test runner: `make test` runs
+# `loup-bootstrap test --native`, which compiles each `func test_*()` here
+# into its own native binary and runs it. Not part of build/stat.
+
+from debug.assert import (expectEq);
+from helpers import (expect_text);
+from sys.clock import (load_time_zone, local_time_text, nine_digits, utc_offset);
+
+extern native "c" func setenv(name: string, value: string, overwrite: int32): int32;
+
+func zone(tz: string): void {
+    setenv("TZ", tz, 1i32);
+    load_time_zone();
+}
+
+func test_nanoseconds(): void {
+    expect_text(nine_digits(5), "000000005", "padded");
+    expect_text(nine_digits(123456789), "123456789", "full");
+}
+
+func test_utc(): void {
+    zone("UTC0");
+    expect_text(local_time_text(0, 5), "1970-01-01 00:00:00.000000005 +0000", "the epoch");
+    expect_text(local_time_text(1792564034, 99378729), "2026-10-21 06:27:14.099378729 +0000", "a recent time");
+    expectEq(utc_offset(0), 0, "no offset");
+}
+
+func test_fixed_offsets(): void {
+    zone("<-05>5");
+    expect_text(local_time_text(0, 0), "1969-12-31 19:00:00.000000000 -0500", "west of UTC");
+    zone("<+0530>-5:30");
+    expect_text(local_time_text(0, 0), "1970-01-01 05:30:00.000000000 +0530", "half an hour");
+    expectEq(utc_offset(0), 19800, "seconds east");
+}
+
+func test_daylight_saving_rules(): void {
+    zone("EST5EDT,M3.2.0,M11.1.0");
+    expect_text(local_time_text(1784000000, 0), "2026-07-13 23:33:20.000000000 -0400", "summer");
+    expect_text(local_time_text(1767000000, 0), "2025-12-29 04:20:00.000000000 -0500", "winter");
+}

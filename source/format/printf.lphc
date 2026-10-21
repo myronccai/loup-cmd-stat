@@ -1,0 +1,380 @@
+@mode(host.native)
+
+# stat's format engine: `%` directives with printf flags, width and
+# precision, filled in by a FieldSource (one for files, one for file
+# systems), and the backslash escapes of --printf.
+#
+# Runtime: host.native. Compiled into the native binary build/stat by
+# `make build` (Stage0 native build). Pure: tests/printf_test.lphc drives
+# it with a hand-made FieldSource in native test binaries.
+#
+# Structure: Field (a value and how to print it), Directive (the parsed
+# `%...`), FieldSource, render() (one directive), expand() (a whole format:
+# one pass over the text, so an escape can never start a directive), and
+# the escape decoder it calls.
+
+pub const FIELD_TEXT: int = 0;
+pub const FIELD_DECIMAL: int = 1;
+pub const FIELD_OCTAL: int = 2;
+pub const FIELD_HEX: int = 3;
+pub const FIELD_SECONDS: int = 4;
+pub const FIELD_UNKNOWN: int = 5;
+
+# A directive's value: text, an unsigned number in some base, or seconds
+# and nanoseconds since the epoch (%X and friends).
+pub class Field {
+    pub let kind: int;
+    pub let text: string;
+    pub let number: uint64;
+    pub let seconds: int;
+    pub let nanos: int;
+
+    new(kind: int, text: string, number: uint64, seconds: int, nanos: int) {
+        this.kind = kind;
+        this.text = text;
+        this.number = number;
+        this.seconds = seconds;
+        this.nanos = nanos;
+    }
+}
+
+pub func text_field(text: string): Field {
+    return Field(FIELD_TEXT, text, 0u64, 0, 0);
+}
+
+pub func decimal_field(n: uint64): Field {
+    return Field(FIELD_DECIMAL, "", n, 0, 0);
+}
+
+pub func octal_field(n: uint64): Field {
+    return Field(FIELD_OCTAL, "", n, 0, 0);
+}
+
+pub func hex_field(n: uint64): Field {
+    return Field(FIELD_HEX, "", n, 0, 0);
+}
+
+pub func seconds_field(seconds: int, nanos: int): Field {
+    return Field(FIELD_SECONDS, "", 0u64, seconds, nanos);
+}
+
+pub func unknown_field(): Field {
+    return Field(FIELD_UNKNOWN, "", 0u64, 0, 0);
+}
+
+# Precision values besides a number of digits.
+pub const NO_PRECISION: int = -1;
+# A "." with no digits: 0 in C, but 9 decimals for %X and friends.
+pub const DOT_ONLY: int = -2;
+
+# One parsed directive: `%-#010.3s` is flags "-#0", width 10, precision 3,
+# conversion "s". The conversion is one letter, or two for GNU's
+# major/minor forms (`Hd`, `Lr`).
+pub class Directive {
+    pub let flags: string;
+    pub let width: int;
+    pub let precision: int;
+    pub let conversion: string;
+
+    new(flags: string, width: int, precision: int, conversion: string) {
+        this.flags = flags;
+        this.width = width;
+        this.precision = precision;
+        this.conversion = conversion;
+    }
+
+    pub func has(flag: string): bool {
+        return this.flags.contains(flag);
+    }
+}
+
+# What a directive's conversion stands for, for one file or file system.
+pub interface FieldSource {
+    func field(conversion: string): Field;
+}
+
+const DIGITS: string = "0123456789";
+const HEX_DIGITS: string = "0123456789abcdef";
+
+func digits_of(n: uint64, base: uint64): string {
+    if (n == 0u64) {
+        return "0";
+    }
+    var reversed: list[string] = [];
+    var rest = n;
+    while (rest > 0u64) {
+        let d = (rest % base) as int;
+        reversed.push(HEX_DIGITS.slice(d, d + 1));
+        rest = rest / base;
+    }
+    var out: list[string] = [];
+    var k = reversed.len() - 1;
+    while (k >= 0) {
+        out.push(reversed[k]);
+        k -= 1;
+    }
+    return out.join("");
+}
+
+func spaces(n: int): string {
+    return if (n > 0) { " ".repeat(n) } else { "" };
+}
+
+# Pads `text` to the directive's width: on the right with `-`, else on the
+# left.
+func pad(d: Directive, text: string): string {
+    let missing = d.width - text.len();
+    if (missing <= 0) {
+        return text;
+    }
+    if (d.has("-")) {
+        return text + spaces(missing);
+    }
+    return spaces(missing) + text;
+}
+
+# A number as printf's %u, %o (with `#`: a leading 0) or %x (`#`: 0x).
+func render_number(d: Directive, f: Field): string {
+    let base = if (f.kind == FIELD_OCTAL) { 8u64 } else if (f.kind == FIELD_HEX) { 16u64 } else { 10u64 };
+    var digits = digits_of(f.number, base);
+    var precision = d.precision;
+    if (precision == DOT_ONLY) {
+        precision = 0;
+    }
+    if (precision == 0 and f.number == 0u64) {
+        digits = "";
+    }
+    while (precision > 0 and digits.len() < precision) {
+        digits = "0" + digits;
+    }
+    var prefix = "";
+    if (d.has("#")) {
+        if (f.kind == FIELD_OCTAL and !digits.startsWith("0")) {
+            prefix = "0";
+        } else if (f.kind == FIELD_HEX and f.number != 0u64) {
+            prefix = "0x";
+        }
+    }
+    # `0` pads with zeros between the prefix and the digits, unless `-` or
+    # a precision says otherwise.
+    if (d.has("0") and !d.has("-") and precision < 0) {
+        while (prefix.len() + digits.len() < d.width) {
+            digits = "0" + digits;
+        }
+    }
+    return pad(d, prefix + digits);
+}
+
+# Seconds since the epoch, with as many decimals as the precision asks
+# (a lone "." means all nine).
+func render_seconds(d: Directive, f: Field): string {
+    var text = str(f.seconds);
+    var decimals = d.precision;
+    if (decimals == DOT_ONLY) {
+        decimals = 9;
+    }
+    if (decimals > 0) {
+        var nanos = str(f.nanos);
+        while (nanos.len() < 9) {
+            nanos = "0" + nanos;
+        }
+        while (nanos.len() < decimals) {
+            nanos = nanos + "0";
+        }
+        text = text + "." + nanos.slice(0, decimals);
+    }
+    return pad(d, text);
+}
+
+# The text for one directive.
+pub func render(d: Directive, f: Field): string {
+    if (f.kind == FIELD_UNKNOWN) {
+        return "?";
+    }
+    if (f.kind == FIELD_SECONDS) {
+        return render_seconds(d, f);
+    }
+    if (f.kind == FIELD_TEXT) {
+        var text = f.text;
+        if (d.precision >= 0 and text.len() > d.precision) {
+            text = text.slice(0, d.precision);
+        } else if (d.precision == DOT_ONLY) {
+            text = "";
+        }
+        return pad(d, text);
+    }
+    return render_number(d, f);
+}
+
+# The result of expanding a format: the text, and the warnings about
+# unknown escapes (for standard error).
+pub class Expansion {
+    pub var text: string = "";
+    pub var warnings: list[string] = [];
+
+    pub modifier func warn(message: string): void {
+        this.warnings.push(message);
+    }
+}
+
+# Reads a run of decimal digits starting at `at`; returns the value, or -1
+# when there is none. `end` receives where the run stops.
+func read_number(chars: list[string], at: int, edits end: list[int]): int {
+    var i = at;
+    var value = 0;
+    var found = false;
+    while (i < chars.len() and DIGITS.contains(chars[i])) {
+        value = value * 10 + DIGITS.index_of(chars[i]);
+        found = true;
+        i += 1;
+    }
+    end.push(i);
+    return if (found) { value } else { -1 };
+}
+
+# Expands `format` for one file (or file system). With `escapes`
+# (--printf), backslash escapes are decoded in the same pass.
+pub func expand(format: string, source: FieldSource, escapes: bool): Expansion {
+    let result = Expansion();
+    var out: list[string] = [];
+    let chars = format.chars();
+    var i = 0;
+    while (i < chars.len()) {
+        let c = chars[i];
+        if (escapes and c == "\\") {
+            i = decode_escape(chars, i + 1, edits: out, edits: result);
+            continue;
+        }
+        if (c != "%") {
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        # A directive: %[flags][width][.precision]conversion
+        var j = i + 1;
+        if (j >= chars.len()) {
+            out.push("%");
+            break;
+        }
+        if (chars[j] == "%") {
+            out.push("%");
+            i = j + 1;
+            continue;
+        }
+        var flags = "";
+        while (j < chars.len() and "-#0+ '".contains(chars[j])) {
+            flags = flags + chars[j];
+            j += 1;
+        }
+        var stops: list[int] = [];
+        let width = read_number(chars, j, edits: stops);
+        j = stops[0];
+        var precision = NO_PRECISION;
+        if (j < chars.len() and chars[j] == ".") {
+            let digits = read_number(chars, j + 1, edits: stops);
+            j = stops[1];
+            precision = if (digits < 0) { DOT_ONLY } else { digits };
+        }
+        if (j >= chars.len()) {
+            # format_problem() refuses such a format before any expansion.
+            out.push(format.slice(i, chars.len()));
+            break;
+        }
+        var conversion = chars[j];
+        if ((conversion == "H" or conversion == "L") and j + 1 < chars.len()
+                and (chars[j + 1] == "d" or chars[j + 1] == "r")) {
+            conversion = conversion + chars[j + 1];
+            j += 1;
+        }
+        let d = Directive(flags, width, precision, conversion);
+        out.push(render(d, source.field(conversion)));
+        i = j + 1;
+    }
+    safe { result.text = out.join(""); }
+    return result;
+}
+
+# GNU stat refuses a format that ends inside a directive ("%-", "%5",
+# "%."); a lone "%" at the end is printed as is. Returns the message, or "".
+pub func format_problem(format: string): string {
+    let chars = format.chars();
+    var i = 0;
+    while (i < chars.len()) {
+        if (chars[i] == "%" and i + 1 < chars.len()) {
+            if (chars[i + 1] == "%") {
+                i += 2;
+                continue;
+            }
+            var j = i + 1;
+            while (j < chars.len() and "-#0+ '.0123456789".contains(chars[j])) {
+                j += 1;
+            }
+            if (j >= chars.len()) {
+                let text = format.slice(i, chars.len());
+                return i"'{$ text $}': invalid directive";
+            }
+            i = j + 1;
+        } else {
+            i += 1;
+        }
+    }
+    return "";
+}
+
+const OCTAL_DIGITS: string = "01234567";
+
+# Decodes the escape whose letter is at `at` (just after the backslash),
+# appends its text to `out`, and returns the index after it. GNU stat's
+# set: \a \b \e \f \n \r \t \v \" \\, \NNN octal (one to three digits, the
+# value taken modulo 256), \xHH hex (one or two digits). Anything else is
+# printed without the backslash, with a warning.
+func decode_escape(chars: list[string], at: int, edits out: list[string], edits result: Expansion): int {
+    if (at >= chars.len()) {
+        out.push("\\");
+        return at;
+    }
+    let c = chars[at];
+    if (OCTAL_DIGITS.contains(c)) {
+        var value = 0;
+        var k = at;
+        while (k < chars.len() and k < at + 3 and OCTAL_DIGITS.contains(chars[k])) {
+            value = value * 8 + OCTAL_DIGITS.index_of(chars[k]);
+            k += 1;
+        }
+        out.push(byte_text(value % 256));
+        return k;
+    }
+    if (c == "x") {
+        var value = 0;
+        var k = at + 1;
+        while (k < chars.len() and k < at + 3 and HEX_DIGITS.contains(chars[k].toLowerCase())) {
+            value = value * 16 + HEX_DIGITS.index_of(chars[k].toLowerCase());
+            k += 1;
+        }
+        if (k == at + 1) {
+            safe { result.warn("warning: unrecognized escape '\\x'"); }
+            out.push("x");
+            return k;
+        }
+        out.push(byte_text(value));
+        return k;
+    }
+    let simple = "abefnrtv\"\\";
+    let index = simple.index_of(c);
+    if (index < 0) {
+        safe { result.warn("warning: unrecognized escape '\\" + c + "'"); }
+        out.push(c);
+        return at + 1;
+    }
+    let codes = [7, 8, 27, 12, 10, 13, 9, 11, 34, 92];
+    out.push(byte_text(codes[index]));
+    return at + 1;
+}
+
+# One byte value as text. Below 128 that is the ASCII character; above, a
+# Loup string cannot hold a lone byte that is not UTF-8, so the value is
+# written as the character U+0080..U+00FF (two bytes in UTF-8) where GNU
+# writes the raw byte.
+func byte_text(value: int): string {
+    return str(char.of(value));
+}

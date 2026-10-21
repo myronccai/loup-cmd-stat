@@ -1,0 +1,82 @@
+@mode(host.native)
+
+# Unit tests for stat's mount table and df mode (df/mounts.lphc): parsing
+# with octal escapes, the df arithmetic, the table layout, and which mount
+# holds a path.
+#
+# Runtime: host.native, run by the test runner: `make test` runs
+# `loup-bootstrap test --native`, which compiles each `func test_*()` here
+# into its own native binary and runs it. Not part of build/stat.
+
+from debug.assert import (expect, expectEq);
+from helpers import (expect_text);
+from df.mounts import (Mount, DfRow, parse_mounts, unescape_field, within, df_row, df_table,
+    hidden_kind, mount_for, read_mounts);
+
+func sample_table(): string {
+    return "proc /proc proc rw,nosuid 0 0\n"
+        + "/dev/sda2 / ext4 rw,relatime 0 0\n"
+        + "/dev/sdb1 /media/my\\040disk vfat rw 0 0\n"
+        + "\n"
+        + "broken line\n";
+}
+
+func test_parse_mount_table(): void {
+    let mounts = parse_mounts(sample_table());
+    expectEq(mounts.len(), 3, "three mounts; short lines skipped");
+    expect_text(mounts[1].source, "/dev/sda2", "source");
+    expect_text(mounts[1].dir, "/", "directory");
+    expect_text(mounts[1].kind, "ext4", "type");
+    expect_text(mounts[2].dir, "/media/my disk", "\\040 is a space");
+}
+
+func test_unescape(): void {
+    expect_text(unescape_field("a\\011b\\134c"), "a\tb\\c", "tab and backslash");
+    expect_text(unescape_field("plain"), "plain", "nothing to do");
+    expect_text(unescape_field("odd\\4"), "odd\\4", "not three digits");
+}
+
+func test_within(): void {
+    expect(within("/home/ann", "/"), "everything is under /");
+    expect(within("/home/ann", "/home"), "below");
+    expect(within("/home", "/home"), "the directory itself");
+    expect(!within("/homework", "/home"), "a longer name is not below");
+}
+
+func test_df_arithmetic(): void {
+    # 1000 blocks of 4096 bytes, 400 free, 300 available to users.
+    let row = df_row("/dev/x", "/x", 1000, 400, 300, 4096);
+    expectEq(row.size_k, 4000, "1K blocks");
+    expectEq(row.used_k, 2400, "used");
+    expectEq(row.avail_k, 1200, "available");
+    expectEq(row.percent, 67, "600 / 900 rounded up");
+    expectEq(df_row("proc", "/proc", 0, 0, 0, 4096).percent, -1, "nothing usable");
+    expectEq(df_row("s", "/s", 3, 0, 0, 512).size_k, 2, "1536 bytes round up to 2K");
+}
+
+func test_table_layout(): void {
+    let rows: list[DfRow] = [
+        df_row("/dev/nvme0n1p2", "/", 1000, 400, 300, 4096),
+        df_row("tmpfs", "/run", 10, 10, 10, 1024),
+    ];
+    let lines = df_table(rows);
+    expectEq(lines.len(), 3, "header and two rows");
+    expect_text(lines[0], "Filesystem     1K-blocks Used Available Use% Mounted on", "header");
+    expect_text(lines[1], "/dev/nvme0n1p2      4000 2400      1200  67% /", "first row");
+    expect_text(lines[2], "tmpfs                 10    0        10   0% /run", "second row");
+}
+
+func test_hidden_kinds(): void {
+    expect(hidden_kind("squashfs") and hidden_kind("devtmpfs"), "hidden");
+    expect(!hidden_kind("ext4") and !hidden_kind("tmpfs"), "shown");
+}
+
+func test_mount_for_a_real_path(): void {
+    let mounts = read_mounts();
+    expect(mounts.len() > 0, "this system has a mount table");
+    match mount_for("/", mounts) {
+        Some(m) => { expect_text(m.dir, "/", "the root file system holds /"); },
+        None => { expect(false, "/ has a mount"); },
+    }
+    expect(mount_for("no/such/path", mounts).is_none(), "a missing path");
+}

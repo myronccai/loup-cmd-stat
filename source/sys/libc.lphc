@@ -1,0 +1,319 @@
+@mode(host.native)
+
+# stat's calls into the C library: file status (stat, lstat, fstat, statx),
+# file-system status (statvfs, statfs), user and group names
+# (getpwuid_r, getgrgid_r), symbolic links (readlink, realpath), errno and
+# strerror, and the C memory those return.
+#
+# Runtime: host.native. Compiled into the native binary build/stat by
+# `make build` (Stage0, `loup-bootstrap build --target native`) and into
+# the unit-test binaries (`loup-bootstrap test --native`). Nothing here can
+# be interpreted: `loup run` stops at the first `extern native` call.
+#
+# Structure: the declarations, C memory (CBuffer, c_text), errno, then one
+# function per question, each copying what it needs out of the C structs
+# into a Loup class before it returns.
+
+from sys.cstructs import (StatBuf, StatxBuf, VfsBuf, FsBuf, PasswdBuf, GroupBuf, PtrCell, CText,
+    CTEXT_BYTES, blank_stat, blank_statx, blank_vfs, blank_fs, blank_passwd, blank_group,
+    blank_cell, blank_text, text_bytes);
+
+extern native "c" func stat(path: string, edits buf: StatBuf): int32;
+extern native "c" func lstat(path: string, edits buf: StatBuf): int32;
+extern native "c" func fstat(fd: int32, edits buf: StatBuf): int32;
+extern native "c" func statx(dirfd: int32, path: string, flags: int32, mask: uint32, edits buf: StatxBuf): int32;
+extern native "c" func statvfs(path: string, edits buf: VfsBuf): int32;
+extern native "c" func statfs(path: string, edits buf: FsBuf): int32;
+extern native "c" func getpwuid_r(uid: uint32, edits pwd: PasswdBuf, buf: NativeHandle, size: uint64, edits result: PtrCell): int32;
+extern native "c" func getgrgid_r(gid: uint32, edits grp: GroupBuf, buf: NativeHandle, size: uint64, edits result: PtrCell): int32;
+extern native "c" func readlink(path: string, buf: NativeHandle, size: uint64): int64;
+extern native "c" func realpath(path: string, resolved: NativeHandle): NativeHandle;
+extern native "c" func malloc(size: uint64): NativeHandle;
+extern native "c" func free(block: NativeHandle): void;
+extern native "c" func strlen(text: NativeHandle): uint64;
+extern native "c" func memcpy(edits dst: CText, src: NativeHandle, n: uint64): NativeHandle;
+extern native "c" func memmove(dst: NativeHandle, src: NativeHandle, n: uint64): NativeHandle;
+extern native "c" func mempcpy(dst: NativeHandle, src: NativeHandle, n: uint64): NativeHandle;
+extern native "c" func __errno_location(): NativeHandle;
+extern native "c" func strerror(code: int32): NativeHandle;
+
+# <fcntl.h> and <linux/stat.h> values (Linux).
+const AT_FDCWD: int = -100;
+const AT_SYMLINK_NOFOLLOW: int = 0x100;
+const AT_EMPTY_PATH: int = 0x1000;
+const STATX_BTIME: int = 0x800;
+const ERANGE: int = 34;
+const PATH_MAX: int = 4096;
+
+# A block of C memory from malloc(). The object owns it: finalize() frees
+# it when the last reference goes away, so a buffer handed to C can never
+# be freed twice or leak on an early return.
+pub class CBuffer {
+    pub let handle: NativeHandle;
+    pub let size: int;
+
+    new(size: int) {
+        this.handle = malloc(size as uint64);
+        this.size = size;
+    }
+
+    func finalize(): void {
+        free(this.handle);
+    }
+}
+
+# The `n` bytes of C memory at `src` as a Loup string (UTF-8 decoded).
+#
+# A NativeHandle is opaque: there is no `src + k`. memcpy() into a CText
+# reads 64 bytes from where a handle points, and mempcpy(), which returns
+# the end of what it copied, is the one way to get a handle k bytes in:
+# copy the first k bytes of `src` over a private copy of it and keep the
+# address it returns. The bytes there are src's, because the copy is.
+pub func c_text(src: NativeHandle, n: int): string {
+    var codes: list[int] = [];
+    if (n > 0) {
+        let copy = CBuffer(n);
+        memmove(copy.handle, src, n as uint64);
+        var at = 0;
+        while (at < n) {
+            let chunk = if (n - at < CTEXT_BYTES) { n - at } else { CTEXT_BYTES };
+            let here = mempcpy(copy.handle, src, at as uint64);
+            var piece = blank_text();
+            memcpy(edits: piece, here, chunk as uint64);
+            text_bytes(piece, chunk, edits: codes);
+            at += chunk;
+        }
+    }
+    let raw = bytesFromInts(codes);
+    return raw.decode();
+}
+
+# A NUL-terminated C string as a Loup string.
+pub func c_string(src: NativeHandle): string {
+    return c_text(src, strlen(src) as int);
+}
+
+# The calling thread's errno, read right after a failed call.
+pub func last_errno(): int {
+    var cell = blank_text();
+    memcpy(edits: cell, __errno_location(), 4u64);
+    return (cell.ct_w0 & 0xFFFFFFFFu64) as int;
+}
+
+# strerror(code): the C library's message for an errno value.
+pub func errno_message(code: int): string {
+    return c_string(strerror(code as int32));
+}
+
+# Everything stat prints about a file, copied out of struct stat (and the
+# birth time out of struct statx).
+pub class FileStatus {
+    pub let name: string;
+    pub let dev: uint64;
+    pub let ino: uint64;
+    pub let nlink: uint64;
+    pub let mode: int;
+    pub let uid: int;
+    pub let gid: int;
+    pub let rdev: uint64;
+    pub let size: int;
+    pub let blksize: int;
+    pub let blocks: int;
+    pub let atime_sec: int;
+    pub let atime_nsec: int;
+    pub let mtime_sec: int;
+    pub let mtime_nsec: int;
+    pub let ctime_sec: int;
+    pub let ctime_nsec: int;
+    # Whether the file system recorded a birth time (statx STATX_BTIME).
+    pub var has_birth: bool = false;
+    pub var btime_sec: int = 0;
+    pub var btime_nsec: int = 0;
+    # The target of a symbolic link (not followed), else "".
+    pub var link_target: string = "";
+
+    new(name: string, buf: StatBuf) {
+        this.name = name;
+        this.dev = buf.st_dev;
+        this.ino = buf.st_ino;
+        this.nlink = buf.st_nlink;
+        this.mode = buf.st_mode as int;
+        this.uid = buf.st_uid as int;
+        this.gid = buf.st_gid as int;
+        this.rdev = buf.st_rdev;
+        this.size = buf.st_size as int;
+        this.blksize = buf.st_blksize as int;
+        this.blocks = buf.st_blocks as int;
+        this.atime_sec = buf.st_atime_sec as int;
+        this.atime_nsec = buf.st_atime_nsec as int;
+        this.mtime_sec = buf.st_mtime_sec as int;
+        this.mtime_nsec = buf.st_mtime_nsec as int;
+        this.ctime_sec = buf.st_ctime_sec as int;
+        this.ctime_nsec = buf.st_ctime_nsec as int;
+    }
+
+    pub modifier func set_birth(sec: int, nsec: int): void {
+        this.has_birth = true;
+        this.btime_sec = sec;
+        this.btime_nsec = nsec;
+    }
+
+    pub modifier func set_link_target(target: string): void {
+        this.link_target = target;
+    }
+}
+
+# stat(2), lstat(2) without `follow`, or fstat(2) of standard input for
+# "-"; then statx(2) for the birth time and readlink(2) for a link's
+# target. Err(errno) when the file cannot be examined.
+pub func file_status(path: string, follow: bool): Result[FileStatus, int] {
+    var buf = blank_stat();
+    var status = 0i32;
+    if (path == "-") {
+        status = fstat(0i32, edits: buf);
+    } else if (follow) {
+        status = stat(path, edits: buf);
+    } else {
+        status = lstat(path, edits: buf);
+    }
+    if (status != 0i32) {
+        return Err(last_errno());
+    }
+    let info = FileStatus(path, buf);
+
+    var bx = blank_statx();
+    var got = 0i32;
+    if (path == "-") {
+        got = statx(0i32, "", AT_EMPTY_PATH as int32, STATX_BTIME as uint32, edits: bx);
+    } else {
+        let flags = if (follow) { 0 } else { AT_SYMLINK_NOFOLLOW };
+        got = statx(AT_FDCWD as int32, path, flags as int32, STATX_BTIME as uint32, edits: bx);
+    }
+    if (got == 0i32 and (bx.stx_mask & (STATX_BTIME as uint32)) != 0u32) {
+        safe { info.set_birth(bx.stx_btime_sec as int, bx.stx_btime_nsec as int); }
+    }
+    if ((info.mode & 0o170000) == 0o120000 and path != "-") {
+        safe { info.set_link_target(link_target(path)); }
+    }
+    return Ok(info);
+}
+
+# The target of the symbolic link `path`, or "" if it cannot be read.
+pub func link_target(path: string): string {
+    let buf = CBuffer(PATH_MAX);
+    let n = readlink(path, buf.handle, PATH_MAX as uint64);
+    if (n < 0i64) {
+        return "";
+    }
+    return c_text(buf.handle, n as int);
+}
+
+# The absolute path of `path` with every symbolic link resolved
+# (realpath(3)), or "" when it cannot be resolved. The result must not be
+# trusted when the call fails, so failure is detected first with stat(2).
+pub func resolved_path(path: string): string {
+    var buf = blank_stat();
+    if (stat(path, edits: buf) != 0i32) {
+        return "";
+    }
+    let out = CBuffer(PATH_MAX + 1);
+    realpath(path, out.handle);
+    return c_string(out.handle);
+}
+
+# st_dev of what `path` names (following links), or -1.
+pub func device_of(path: string): int {
+    var buf = blank_stat();
+    if (stat(path, edits: buf) != 0i32) {
+        return -1;
+    }
+    return buf.st_dev as int;
+}
+
+# What stat -f prints about a file system: statvfs(3), plus the type from
+# statfs(2).
+pub class FsStatus {
+    pub let name: string;
+    pub let bsize: int;
+    pub let frsize: int;
+    pub let blocks: int;
+    pub let bfree: int;
+    pub let bavail: int;
+    pub let files: int;
+    pub let ffree: int;
+    pub let fsid: uint64;
+    pub let namemax: int;
+    pub let fs_kind: int;
+
+    new(name: string, v: VfsBuf, kind: int) {
+        this.name = name;
+        this.bsize = v.f_bsize as int;
+        this.frsize = v.f_frsize as int;
+        this.blocks = v.f_blocks as int;
+        this.bfree = v.f_bfree as int;
+        this.bavail = v.f_bavail as int;
+        this.files = v.f_files as int;
+        this.ffree = v.f_ffree as int;
+        # glibc's statvfs packs fsid_t's two ints as val[0] | val[1] << 32;
+        # GNU stat prints them in statfs's order, val[0] first.
+        let raw = v.f_fsid;
+        this.fsid = (raw >> 32u64) | ((raw & 0xFFFFFFFFu64) << 32u64);
+        this.namemax = v.f_namemax as int;
+        this.fs_kind = kind;
+    }
+}
+
+pub func fs_status(path: string): Result[FsStatus, int] {
+    var v = blank_vfs();
+    if (statvfs(path, edits: v) != 0i32) {
+        return Err(last_errno());
+    }
+    var f = blank_fs();
+    var kind = 0;
+    if (statfs(path, edits: f) == 0i32) {
+        kind = f.fs_type as int;
+    }
+    return Ok(FsStatus(path, v, kind));
+}
+
+# The name of user `uid` from the passwd database (files, LDAP, ... as
+# nsswitch.conf says), or None. getpwuid_r is the reentrant getpwuid: the
+# caller provides the buffer for the strings, and a not-found shows as a
+# NULL `result`, which stat can test because PtrCell holds it as an
+# address.
+pub func user_name(uid: int): Option[string] {
+    var size = 1024;
+    while (size <= 1048576) {
+        let strings = CBuffer(size);
+        var pwd = blank_passwd(strings.handle);
+        var found = blank_cell();
+        let status = getpwuid_r(uid as uint32, edits: pwd, strings.handle, size as uint64, edits: found) as int;
+        if (status == ERANGE) {
+            size = size * 4;
+        } else if (status != 0 or found.cell_address == 0u64) {
+            return None;
+        } else {
+            return Some(c_string(pwd.pw_name));
+        }
+    }
+    return None;
+}
+
+# The name of group `gid`, or None (getgrgid_r, as user_name()).
+pub func group_name(gid: int): Option[string] {
+    var size = 1024;
+    while (size <= 1048576) {
+        let strings = CBuffer(size);
+        var grp = blank_group(strings.handle);
+        var found = blank_cell();
+        let status = getgrgid_r(gid as uint32, edits: grp, strings.handle, size as uint64, edits: found) as int;
+        if (status == ERANGE) {
+            size = size * 4;
+        } else if (status != 0 or found.cell_address == 0u64) {
+            return None;
+        } else {
+            return Some(c_string(grp.gr_name));
+        }
+    }
+    return None;
+}

@@ -1,0 +1,73 @@
+@mode(host.native)
+
+# Unit tests for stat's directives (format/fields.lphc) on files the tests
+# create: the deterministic fields (name, size, type, mode, links), %N
+# quoting, the default and terse formats' shape, and file-system fields.
+#
+# Runtime: host.native, run by the test runner: `make test` runs
+# `loup-bootstrap test --native`, which compiles each `func test_*()` here
+# into its own native binary and runs it in a fresh temporary directory.
+# Not part of build/stat.
+
+from debug.assert import (expect, expectEq);
+from helpers import (expect_text, make_file, make_hard_link, make_symlink, make_fifo);
+from format.fields import (FileFields, FsFields, shell_quote, default_file_format, default_fs_format);
+from format.printf import (expand);
+from sys.libc import (file_status, fs_status);
+
+func show(format: string, path: string, quoted: bool): string {
+    let st = file_status(path, false).unwrap();
+    return expand(format, FileFields(st, quoted), false).text;
+}
+
+func test_deterministic_fields(): void {
+    make_file("data.bin", 5000, 0o640);
+    make_hard_link("data.bin", "data.link");
+    expect_text(show("%n|%s|%F|%a|%#a|%A|%h|%f", "data.bin", true),
+        "data.bin|5000|regular file|640|0640|-rw-r-----|2|81a0", "a file with two links");
+    make_file("empty", 0, 0o600);
+    expect_text(show("%F %04a %A", "empty", true), "regular empty file 0600 -rw-------", "empty file");
+    make_fifo("pipe");
+    expect_text(show("%F %A", "pipe", true), "fifo prw-r--r--", "fifo (umask may clear bits; 644 has none to clear)");
+}
+
+func test_quoted_names(): void {
+    make_file("plain", 1, 0o644);
+    make_symlink("plain", "to plain");
+    expect_text(show("%N", "to plain", true), "'to plain' -> 'plain'", "quoted, with the target");
+    expect_text(show("%N", "to plain", false), "to plain -> plain", "the default report does not quote");
+    expect_text(shell_quote("it's"), "\"it's\"", "a single quote");
+    expect_text(shell_quote("it's $x"), "'it'\\''s $x'", "a single quote and a $");
+}
+
+func test_owner_and_times_have_values(): void {
+    make_file("mine", 1, 0o644);
+    let text = show("%U|%G|%x|%W", "mine", true);
+    expect(!text.contains("?"), "every directive known");
+    expectEq(text.split("|").len(), 4, "four fields");
+}
+
+func test_default_format_shape(): void {
+    make_file("shape", 7, 0o644);
+    let lines = show(default_file_format(false), "shape", false).split("\n");
+    expectEq(lines.len(), 9, "eight lines and the final newline");
+    expect_text(lines[0], "  File: shape", "name line");
+    expect(lines[1].startsWith("  Size: 7         \tBlocks: "), "size line");
+    expect(lines[1].endsWith(" regular file"), "type at the end");
+    expect(lines[3].startsWith("Access: (0644/-rw-r--r--)  Uid: ("), "mode line");
+    expect(lines[7].startsWith(" Birth: "), "birth line");
+}
+
+func test_unknown_directive(): void {
+    make_file("q", 1, 0o644);
+    expect_text(show("[%Q]", "q", true), "[?]", "unknown");
+}
+
+func test_file_system_fields(): void {
+    let fs = fs_status(".").unwrap();
+    let text = expand("%n|%l|%T", FsFields(fs), false).text;
+    expect(text.startsWith(".|"), "name");
+    expect(!text.contains("?"), "known directives");
+    let report = expand(default_fs_format(), FsFields(fs), false).text;
+    expect(report.startsWith("  File: \".\"\n    ID: "), "the -f report");
+}

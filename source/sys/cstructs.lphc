@@ -1,0 +1,377 @@
+@mode(host.native)
+
+# The C structs stat exchanges with glibc, declared field by field in C
+# order with `@repr(C)`, and the size checks that guard them.
+#
+# Runtime: host.native. Compiled into the native binary build/stat by
+# `make build` (Stage0, `loup-bootstrap build --target native`) and into
+# the unit-test binaries; tests/cstructs_test.lphc checks every size.
+#
+# Layout assumed: Linux on x86-64 with glibc (LP64: `long` and pointers are
+# 8 bytes; `dev_t`, `ino_t`, `nlink_t`, `off_t`, `blkcnt_t`, `time_t` 8
+# bytes; `mode_t`, `uid_t`, `gid_t` 4 bytes). Other architectures order
+# `struct stat` differently (aarch64 has a 4-byte `st_nlink` after
+# `st_mode`), so the program checks the sizes at start-up and refuses to run
+# when one does not match (see layout_errors()).
+#
+# Every field keeps its C name and prefix (`st_`, `stx_`, `tm_`, ...), and
+# no other type in the program uses those names: the native back end places
+# struct fields by name across the whole program, so a shared field name
+# could move a field away from its C offset. statfs(2) fields are called
+# `f_*` in C like statvfs's; here they are `fs_*` to keep the names apart.
+#
+# Pointer members that stat follows are `NativeHandle`s; those it never
+# follows are plain `uint64` addresses.
+
+# struct stat (<bits/struct_stat.h>), 144 bytes.
+@repr(C)
+pub struct StatBuf {
+    pub var st_dev: uint64;
+    pub var st_ino: uint64;
+    pub var st_nlink: uint64;
+    pub var st_mode: uint32;
+    pub var st_uid: uint32;
+    pub var st_gid: uint32;
+    pub var st_pad0: int32;
+    pub var st_rdev: uint64;
+    pub var st_size: int64;
+    pub var st_blksize: int64;
+    pub var st_blocks: int64;
+    pub var st_atime_sec: int64;
+    pub var st_atime_nsec: int64;
+    pub var st_mtime_sec: int64;
+    pub var st_mtime_nsec: int64;
+    pub var st_ctime_sec: int64;
+    pub var st_ctime_nsec: int64;
+    pub var st_unused0: int64;
+    pub var st_unused1: int64;
+    pub var st_unused2: int64;
+}
+
+# struct statx (<linux/stat.h>), 256 bytes. stat uses it only for the birth
+# time, which struct stat does not have. Each struct statx_timestamp is
+# flattened into its three members.
+@repr(C)
+pub struct StatxBuf {
+    pub var stx_mask: uint32;
+    pub var stx_blksize: uint32;
+    pub var stx_attributes: uint64;
+    pub var stx_nlink: uint32;
+    pub var stx_uid: uint32;
+    pub var stx_gid: uint32;
+    pub var stx_mode: uint16;
+    pub var stx_spare0: uint16;
+    pub var stx_ino: uint64;
+    pub var stx_size: uint64;
+    pub var stx_blocks: uint64;
+    pub var stx_attributes_mask: uint64;
+    pub var stx_atime_sec: int64;
+    pub var stx_atime_nsec: uint32;
+    pub var stx_atime_reserved: int32;
+    pub var stx_btime_sec: int64;
+    pub var stx_btime_nsec: uint32;
+    pub var stx_btime_reserved: int32;
+    pub var stx_ctime_sec: int64;
+    pub var stx_ctime_nsec: uint32;
+    pub var stx_ctime_reserved: int32;
+    pub var stx_mtime_sec: int64;
+    pub var stx_mtime_nsec: uint32;
+    pub var stx_mtime_reserved: int32;
+    pub var stx_rdev_major: uint32;
+    pub var stx_rdev_minor: uint32;
+    pub var stx_dev_major: uint32;
+    pub var stx_dev_minor: uint32;
+    pub var stx_mnt_id: uint64;
+    pub var stx_dio_mem_align: uint32;
+    pub var stx_dio_offset_align: uint32;
+    pub var stx_spare1: uint64;
+    pub var stx_spare2: uint64;
+    pub var stx_spare3: uint64;
+    pub var stx_spare4: uint64;
+    pub var stx_spare5: uint64;
+    pub var stx_spare6: uint64;
+    pub var stx_spare7: uint64;
+    pub var stx_spare8: uint64;
+    pub var stx_spare9: uint64;
+    pub var stx_spare10: uint64;
+    pub var stx_spare11: uint64;
+    pub var stx_spare12: uint64;
+}
+
+# struct statvfs (<bits/statvfs.h>), 112 bytes. glibc 2.40 turned the
+# first spare int into `f_type`; stat reads the type from statfs instead,
+# which every glibc fills.
+@repr(C)
+pub struct VfsBuf {
+    pub var f_bsize: uint64;
+    pub var f_frsize: uint64;
+    pub var f_blocks: uint64;
+    pub var f_bfree: uint64;
+    pub var f_bavail: uint64;
+    pub var f_files: uint64;
+    pub var f_ffree: uint64;
+    pub var f_favail: uint64;
+    pub var f_fsid: uint64;
+    pub var f_flag: uint64;
+    pub var f_namemax: uint64;
+    pub var f_spare0: int32;
+    pub var f_spare1: int32;
+    pub var f_spare2: int32;
+    pub var f_spare3: int32;
+    pub var f_spare4: int32;
+    pub var f_spare5: int32;
+}
+
+# struct statfs (<bits/statfs.h>), 120 bytes; C names its fields f_*.
+@repr(C)
+pub struct FsBuf {
+    pub var fs_type: int64;
+    pub var fs_bsize: int64;
+    pub var fs_blocks: uint64;
+    pub var fs_bfree: uint64;
+    pub var fs_bavail: uint64;
+    pub var fs_files: uint64;
+    pub var fs_ffree: uint64;
+    pub var fs_fsid: uint64;
+    pub var fs_namelen: int64;
+    pub var fs_frsize: int64;
+    pub var fs_flags: int64;
+    pub var fs_spare0: int64;
+    pub var fs_spare1: int64;
+    pub var fs_spare2: int64;
+    pub var fs_spare3: int64;
+}
+
+# struct tm (<bits/types/struct_tm.h>), 56 bytes, with the padding C puts
+# before tm_gmtoff written out.
+@repr(C)
+pub struct TmBuf {
+    pub var tm_sec: int32;
+    pub var tm_min: int32;
+    pub var tm_hour: int32;
+    pub var tm_mday: int32;
+    pub var tm_mon: int32;
+    pub var tm_year: int32;
+    pub var tm_wday: int32;
+    pub var tm_yday: int32;
+    pub var tm_isdst: int32;
+    pub var tm_pad: int32;
+    pub var tm_gmtoff: int64;
+    pub var tm_zone: uint64;
+}
+
+# A time_t, passed to localtime_r by address.
+@repr(C)
+pub struct TimeBox {
+    pub var tt_sec: int64;
+}
+
+# struct passwd (<pwd.h>), 48 bytes.
+@repr(C)
+pub struct PasswdBuf {
+    pub var pw_name: NativeHandle;
+    pub var pw_passwd: uint64;
+    pub var pw_uid: uint32;
+    pub var pw_gid: uint32;
+    pub var pw_gecos: uint64;
+    pub var pw_dir: uint64;
+    pub var pw_shell: uint64;
+}
+
+# struct group (<grp.h>), 32 bytes.
+@repr(C)
+pub struct GroupBuf {
+    pub var gr_name: NativeHandle;
+    pub var gr_passwd: uint64;
+    pub var gr_gid: uint32;
+    pub var gr_pad: uint32;
+    pub var gr_mem: uint64;
+}
+
+# An out-parameter of pointer type (`struct passwd **result`): read as an
+# address, so it can be compared with 0, which a NativeHandle cannot.
+@repr(C)
+pub struct PtrCell {
+    pub var cell_address: uint64;
+}
+
+# 64 bytes of C text, eight bytes per word (Loup has no fixed-size arrays
+# in hosted structs). strftime() writes into it, and memcpy() copies C
+# strings into it one chunk at a time; text_of() turns it back into bytes.
+@repr(C)
+pub struct CText {
+    pub var ct_w0: uint64;
+    pub var ct_w1: uint64;
+    pub var ct_w2: uint64;
+    pub var ct_w3: uint64;
+    pub var ct_w4: uint64;
+    pub var ct_w5: uint64;
+    pub var ct_w6: uint64;
+    pub var ct_w7: uint64;
+}
+
+pub const CTEXT_BYTES: int = 64;
+
+pub func blank_stat(): StatBuf {
+    return StatBuf(
+        st_dev = 0u64, st_ino = 0u64, st_nlink = 0u64, st_mode = 0u32,
+        st_uid = 0u32, st_gid = 0u32, st_pad0 = 0i32, st_rdev = 0u64,
+        st_size = 0i64, st_blksize = 0i64, st_blocks = 0i64,
+        st_atime_sec = 0i64, st_atime_nsec = 0i64, st_mtime_sec = 0i64,
+        st_mtime_nsec = 0i64, st_ctime_sec = 0i64, st_ctime_nsec = 0i64,
+        st_unused0 = 0i64, st_unused1 = 0i64, st_unused2 = 0i64,
+    );
+}
+
+pub func blank_statx(): StatxBuf {
+    return StatxBuf(
+        stx_mask = 0u32, stx_blksize = 0u32, stx_attributes = 0u64,
+        stx_nlink = 0u32, stx_uid = 0u32, stx_gid = 0u32, stx_mode = 0u16,
+        stx_spare0 = 0u16, stx_ino = 0u64, stx_size = 0u64, stx_blocks = 0u64,
+        stx_attributes_mask = 0u64,
+        stx_atime_sec = 0i64, stx_atime_nsec = 0u32, stx_atime_reserved = 0i32,
+        stx_btime_sec = 0i64, stx_btime_nsec = 0u32, stx_btime_reserved = 0i32,
+        stx_ctime_sec = 0i64, stx_ctime_nsec = 0u32, stx_ctime_reserved = 0i32,
+        stx_mtime_sec = 0i64, stx_mtime_nsec = 0u32, stx_mtime_reserved = 0i32,
+        stx_rdev_major = 0u32, stx_rdev_minor = 0u32, stx_dev_major = 0u32,
+        stx_dev_minor = 0u32, stx_mnt_id = 0u64, stx_dio_mem_align = 0u32,
+        stx_dio_offset_align = 0u32, stx_spare1 = 0u64, stx_spare2 = 0u64,
+        stx_spare3 = 0u64, stx_spare4 = 0u64, stx_spare5 = 0u64,
+        stx_spare6 = 0u64, stx_spare7 = 0u64, stx_spare8 = 0u64,
+        stx_spare9 = 0u64, stx_spare10 = 0u64, stx_spare11 = 0u64,
+        stx_spare12 = 0u64,
+    );
+}
+
+pub func blank_vfs(): VfsBuf {
+    return VfsBuf(
+        f_bsize = 0u64, f_frsize = 0u64, f_blocks = 0u64, f_bfree = 0u64,
+        f_bavail = 0u64, f_files = 0u64, f_ffree = 0u64, f_favail = 0u64,
+        f_fsid = 0u64, f_flag = 0u64, f_namemax = 0u64, f_spare0 = 0i32,
+        f_spare1 = 0i32, f_spare2 = 0i32, f_spare3 = 0i32, f_spare4 = 0i32,
+        f_spare5 = 0i32,
+    );
+}
+
+pub func blank_fs(): FsBuf {
+    return FsBuf(
+        fs_type = 0i64, fs_bsize = 0i64, fs_blocks = 0u64, fs_bfree = 0u64,
+        fs_bavail = 0u64, fs_files = 0u64, fs_ffree = 0u64, fs_fsid = 0u64,
+        fs_namelen = 0i64, fs_frsize = 0i64, fs_flags = 0i64, fs_spare0 = 0i64,
+        fs_spare1 = 0i64, fs_spare2 = 0i64, fs_spare3 = 0i64,
+    );
+}
+
+pub func blank_tm(): TmBuf {
+    return TmBuf(
+        tm_sec = 0i32, tm_min = 0i32, tm_hour = 0i32, tm_mday = 0i32,
+        tm_mon = 0i32, tm_year = 0i32, tm_wday = 0i32, tm_yday = 0i32,
+        tm_isdst = 0i32, tm_pad = 0i32, tm_gmtoff = 0i64, tm_zone = 0u64,
+    );
+}
+
+pub func time_box(seconds: int): TimeBox {
+    return TimeBox(tt_sec = seconds as int64);
+}
+
+# NativeHandle has no literal, not even NULL, so the pointer members start
+# out as some valid handle (`placeholder`); the C call overwrites them.
+pub func blank_passwd(placeholder: NativeHandle): PasswdBuf {
+    return PasswdBuf(pw_name = placeholder, pw_passwd = 0u64, pw_uid = 0u32,
+        pw_gid = 0u32, pw_gecos = 0u64, pw_dir = 0u64, pw_shell = 0u64);
+}
+
+pub func blank_group(placeholder: NativeHandle): GroupBuf {
+    return GroupBuf(gr_name = placeholder, gr_passwd = 0u64, gr_gid = 0u32,
+        gr_pad = 0u32, gr_mem = 0u64);
+}
+
+pub func blank_cell(): PtrCell {
+    return PtrCell(cell_address = 0u64);
+}
+
+pub func blank_text(): CText {
+    return CText(ct_w0 = 0u64, ct_w1 = 0u64, ct_w2 = 0u64, ct_w3 = 0u64,
+        ct_w4 = 0u64, ct_w5 = 0u64, ct_w6 = 0u64, ct_w7 = 0u64);
+}
+
+func text_word(t: CText, k: int): uint64 {
+    if (k == 0) {
+        return t.ct_w0;
+    } else if (k == 1) {
+        return t.ct_w1;
+    } else if (k == 2) {
+        return t.ct_w2;
+    } else if (k == 3) {
+        return t.ct_w3;
+    } else if (k == 4) {
+        return t.ct_w4;
+    } else if (k == 5) {
+        return t.ct_w5;
+    } else if (k == 6) {
+        return t.ct_w6;
+    }
+    return t.ct_w7;
+}
+
+# Appends the first `n` bytes of `t` to `out`. x86-64 is little-endian:
+# byte k of a word is bits 8k..8k+7.
+pub func text_bytes(t: CText, n: int, edits out: list[int]): void {
+    var k = 0;
+    while (k < n and k < CTEXT_BYTES) {
+        let word = text_word(t, k / 8);
+        let shift = ((k % 8) * 8) as uint64;
+        out.push(((word >> shift) & 255u64) as int);
+        k += 1;
+    }
+}
+
+# The size of one of these structs by its C name, or -1. size_of[T]() only
+# measures a struct declared in the same module (elsewhere it is
+# E_SIZE_OF_UNSIZED), so other modules and the tests ask here.
+pub func c_size(name: string): int {
+    if (name == "struct stat") {
+        return size_of[StatBuf]();
+    } else if (name == "struct statx") {
+        return size_of[StatxBuf]();
+    } else if (name == "struct statvfs") {
+        return size_of[VfsBuf]();
+    } else if (name == "struct statfs") {
+        return size_of[FsBuf]();
+    } else if (name == "struct tm") {
+        return size_of[TmBuf]();
+    } else if (name == "time_t") {
+        return size_of[TimeBox]();
+    } else if (name == "pointer") {
+        return size_of[PtrCell]();
+    } else if (name == "text chunk") {
+        return size_of[CText]();
+    }
+    return -1;
+}
+
+# The alignment of struct stat and struct tm (8: they have 8-byte members).
+pub func c_alignments(): list[int] {
+    return [align_of[StatBuf](), align_of[TmBuf]()];
+}
+
+# The structs whose size differs from glibc's on x86-64, as messages.
+pub func layout_errors(): list[string] {
+    var errors: list[string] = [];
+    check_size(edits: errors, "struct stat", size_of[StatBuf](), 144);
+    check_size(edits: errors, "struct statx", size_of[StatxBuf](), 256);
+    check_size(edits: errors, "struct statvfs", size_of[VfsBuf](), 112);
+    check_size(edits: errors, "struct statfs", size_of[FsBuf](), 120);
+    check_size(edits: errors, "struct tm", size_of[TmBuf](), 56);
+    # struct passwd and struct group cannot be measured: they have a
+    # NativeHandle member, and size_of refuses a handle
+    # (E_SIZE_OF_UNSIZED). Their layout is checked by hand above: 8-byte
+    # pointers and two 4-byte ids, 48 and 32 bytes.
+    return errors;
+}
+
+func check_size(edits errors: list[string], name: string, actual: int, expected: int): void {
+    if (actual != expected) {
+        errors.push(i"{$ name $} is {$ actual $} bytes here, glibc on x86-64 has {$ expected $}");
+    }
+}

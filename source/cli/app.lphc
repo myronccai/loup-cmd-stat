@@ -1,0 +1,35 @@
+@mode(host.native)
+
+# Top level of stat: parse the arguments, answer --help and --version, and
+# run the command; usage errors print GNU's hint and exit 1.
+#
+# Runtime: host.native. Compiled into the native binary build/stat by
+# `make build` (Stage0 native build). tests/app_test.lphc calls run()
+# inside native test binaries.
+
+from appinfo import (APP_NAME, EXIT_OK, EXIT_FAILURE);
+from cli.args import (Options, parse_args);
+from cli.usage import (usage, version_line);
+from commands.stat import (run_stat);
+
+# Parses argv, runs stat and returns the exit status.
+pub func run(argv: list[string]): int {
+    match parse_args(argv) {
+        Ok(opts) => {
+            if (opts.help) {
+                println(usage());
+                return EXIT_OK;
+            }
+            if (opts.version) {
+                println(version_line());
+                return EXIT_OK;
+            }
+            return run_stat(opts);
+        },
+        Err(msg) => {
+            printErr(i"{$ APP_NAME $}: {$ msg $}");
+            printErr(i"Try '{$ APP_NAME $} --help' for more information.");
+            return EXIT_FAILURE;
+        },
+    }
+}

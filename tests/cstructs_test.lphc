@@ -1,0 +1,41 @@
+@mode(host.native)
+
+# Unit tests for stat's C structs (sys/cstructs.lphc): their sizes match
+# glibc's on x86-64, and CText gives back the bytes C wrote.
+#
+# Runtime: host.native, run by the test runner: `make test` runs
+# `loup-bootstrap test --native`, which compiles each `func test_*()` here
+# into its own native binary and runs it. Not part of build/stat.
+
+from debug.assert import (expect, expectEq);
+from sys.cstructs import (c_size, c_alignments, layout_errors, blank_text, text_bytes);
+
+func test_sizes_match_glibc(): void {
+    expectEq(c_size("struct stat"), 144, "struct stat");
+    expectEq(c_size("struct statx"), 256, "struct statx");
+    expectEq(c_size("struct statvfs"), 112, "struct statvfs");
+    expectEq(c_size("struct statfs"), 120, "struct statfs");
+    expectEq(c_size("struct tm"), 56, "struct tm");
+    expectEq(c_size("time_t"), 8, "time_t");
+    expectEq(c_size("pointer"), 8, "a pointer");
+    expectEq(c_size("text chunk"), 64, "64 bytes of text");
+    expectEq(c_size("struct nothing"), -1, "unknown name");
+}
+
+func test_alignment(): void {
+    let alignments = c_alignments();
+    expectEq(alignments[0], 8, "struct stat: 8-byte members");
+    expectEq(alignments[1], 8, "struct tm: tm_gmtoff aligns it to 8");
+}
+
+func test_layout_check_passes_here(): void {
+    expectEq(layout_errors().len(), 0, "no struct differs from glibc's");
+}
+
+func test_blank_text_is_zero(): void {
+    var t = blank_text();
+    var out: list[int] = [];
+    text_bytes(t, 3, edits: out);
+    expectEq(out.len(), 3, "three bytes");
+    expect(out[0] == 0 and out[2] == 0, "zero bytes");
+}

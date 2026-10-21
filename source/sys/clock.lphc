@@ -1,0 +1,58 @@
+@mode(host.native)
+
+# Local time for stat's %x %y %z %w: the C library converts the seconds
+# with the system's time zone rules (TZ, /etc/localtime) and formats them.
+#
+# Runtime: host.native. Compiled into the native binary build/stat by
+# `make build` (Stage0 native build) and into the unit-test binaries,
+# which run with TZ=UTC0 (tests/clock_test.lphc). `core.datetime` knows only
+# UTC, which is why this goes through localtime_r(3) and strftime(3).
+
+from sys.cstructs import (TimeBox, TmBuf, CText, blank_tm, blank_text, time_box, text_bytes);
+
+extern native "c" func tzset(): void;
+extern native "c" func localtime_r(edits t: TimeBox, edits tm: TmBuf): NativeHandle;
+extern native "c" func strftime(edits out: CText, max: uint64, format: string, edits tm: TmBuf): uint64;
+
+# Reads TZ and the zone files once, before the first conversion.
+pub func load_time_zone(): void {
+    tzset();
+}
+
+# strftime(3) of `tm` with `format`, for formats whose result fits in a
+# CText (64 bytes with the NUL).
+func strftime_text(format: string, edits tm: TmBuf): string {
+    var out = blank_text();
+    let n = strftime(edits: out, 64u64, format, edits: tm) as int;
+    var codes: list[int] = [];
+    text_bytes(out, n, edits: codes);
+    let raw = bytesFromInts(codes);
+    return raw.decode();
+}
+
+# Nanoseconds as the nine digits after the decimal point.
+pub func nine_digits(nsec: int): string {
+    var digits = str(nsec);
+    while (digits.len() < 9) {
+        digits = "0" + digits;
+    }
+    return digits;
+}
+
+# GNU stat's time: "2026-10-20 23:27:14.097378708 -0700", in local time.
+pub func local_time_text(sec: int, nsec: int): string {
+    var t = time_box(sec);
+    var tm = blank_tm();
+    localtime_r(edits: t, edits: tm);
+    let date = strftime_text("%Y-%m-%d %H:%M:%S", edits: tm);
+    let zone = strftime_text("%z", edits: tm);
+    return date + "." + nine_digits(nsec) + " " + zone;
+}
+
+# The offset of local time from UTC at `sec`, in seconds east (tm_gmtoff).
+pub func utc_offset(sec: int): int {
+    var t = time_box(sec);
+    var tm = blank_tm();
+    localtime_r(edits: t, edits: tm);
+    return tm.tm_gmtoff as int;
+}

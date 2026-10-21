@@ -1,0 +1,34 @@
+@mode(host.native)
+
+# Unit tests for stat's top level (cli/app.lphc, commands/stat.lphc): exit
+# statuses of whole runs. Their output goes to the test log.
+#
+# Runtime: host.native, run by the test runner: `make test` runs
+# `loup-bootstrap test --native`, which compiles each `func test_*()` here
+# into its own native binary and runs it in a fresh temporary directory.
+# Not part of build/stat.
+
+from debug.assert import (expectEq);
+from helpers import (make_file);
+from cli.app import (run);
+
+func test_help_and_version(): void {
+    expectEq(run(["--version"]), 0, "--version");
+    expectEq(run(["--help"]), 0, "--help");
+}
+
+func test_statuses(): void {
+    make_file("here", 3, 0o644);
+    expectEq(run(["-c", "%n %s", "here"]), 0, "a file");
+    expectEq(run(["here", "missing"]), 1, "one missing");
+    expectEq(run(["-f", "here"]), 0, "its file system");
+    expectEq(run(["-f", "missing"]), 1, "no file system");
+    expectEq(run(["-c", "%-", "here"]), 1, "an unfinished directive");
+    expectEq(run(["--df", "here"]), 0, "--df of a file");
+}
+
+func test_usage_errors(): void {
+    let none: list[string] = [];
+    expectEq(run(none), 1, "missing operand");
+    expectEq(run(["--bogus", "x"]), 1, "unknown option");
+}
